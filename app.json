@@ -1,32 +1,83 @@
 {
   "expo": {
-    "name": "JamilOdehHRApp",
-    "slug": "JamilOdehHRApp",
-    "version": "1.0.0",
+    "name": "Hygex",
+    "slug": "hygex",
+    "version": "2.0.1",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "sdkVersion": "54.0.0",
+    "icon": "./assets/logo.png",
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/logo.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "updates": {
-      "fallbackToCacheTimeout": 0
+      "fallbackToCacheTimeout": 0,
+      "enabled": true,
+      "url": "https://u.expo.dev/557f6dd8-be28-4431-a9c6-6114d4679849"
     },
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true
+      "bundleIdentifier": "com.puresoft.hygex",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "This app needs access to the camera to take photos for attachments.",
+        "NSMicrophoneUsageDescription": "This app needs access to the microphone to record audio attachments.",
+        "NSPhotoLibraryUsageDescription": "This app needs access to the photo library to select images for attachments."
+      }
     },
     "android": {
+      "package": "com.puresoft.hygex",
+      "versionCode": 3,
+      "googleServicesFile": "./app/google-services.json",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/logo.png",
         "backgroundColor": "#FFFFFF"
-      }
+      },
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "MEDIA_LIBRARY",
+        "NOTIFICATIONS",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_NETWORK_STATE",
+        "CAMERA",
+        "READ_CALL_LOG",
+        "INTERNET"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "description": "",
+    "runtimeVersion": "exposdk:54.0.0",
+    "extra": {
+      "eas": {
+        "projectId": "557f6dd8-be28-4431-a9c6-6114d4679849"
+      }
+    },
+    "plugins": [
+      "expo-localization",
+      "expo-secure-store",
+      "expo-asset",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "This app needs access to the photo library to select images for attachments.",
+          "cameraPermission": "This app needs access to the camera to take photos for attachments."
+        }
+      ],
+      [
+        "expo-document-picker",
+        {
+          "iCloudContainerEnvironment": "Production"
+        }
+      ],
+      "expo-audio",
+      "expo-font"
+    ]
   }
 }
