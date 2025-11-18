@@ -26,7 +26,9 @@ import {
     Platform,
     Linking,
     PermissionsAndroid,
-    ActivityIndicator
+    ActivityIndicator,
+    ScrollView,
+    KeyboardAvoidingView
 } from "react-native";
 import i18n from "../languages/langStrings";
 import RadioGroup, { RadioButtonProps } from "react-native-radio-buttons-group";
@@ -36,7 +38,6 @@ import { height, width } from "../utils/Styles";
 import * as SQLite from "expo-sqlite";
 import moment from 'moment';
 import DropDownPicker from 'react-native-dropdown-picker';
-import * as FileSystem from 'expo-file-system';
 import CustomerContacts from '../components/CustomerContacts';
 import ProgressDialog from "../components/ProgressDialog";
 
@@ -120,7 +121,6 @@ export const NewVisitScreen = ({ route, navigation }) => {
     const [callEnded, setCallEnded] = useState(false);
     const [isReadOnly, setIsReadOnly] = useState(false);
     const [ignoreLoc, setIgnoreLoc] = useState(false);
-    const [location, setLocation] = useState(null);
     const [startLocation, setStartLocation] = useState("");
     const [visitStartTime, setVisitStartTime] = useState("");
     const [selectedDepartmentLocation, setSelectedDepartmentLocation] = useState("");
@@ -135,12 +135,16 @@ export const NewVisitScreen = ({ route, navigation }) => {
     const [visitTypeOpen, setVisitTypeOpen] = useState(false);
     const [businessTypeOpen, setBusinessTypeOpen] = useState(false);
     const [isHygex, setIsHygex] = useState(false);
+    const [isNotesVisit, setIsNotesVisit] = useState(false);
+    const [visitNotes, setVisitNotes] = useState("");
+    const [visitAttachments, setVisitAttachments] = useState([]);
 
     const [visitCallItems, setVisitCallItems] = useState([
         { label: i18n.t("chooseAction"), value: "", disabled: true },
         { label: i18n.t("visit"), value: "Visit" },
         { label: i18n.t("call"), value: "Call" },
         { label: i18n.t("addRequest"), value: "Request" },
+        { label: i18n.t("priceOffer"), value: "Price Offer" },
     ]);
 
     const [visitTypeItems, setVisitTypeItems] = useState([
@@ -169,93 +173,102 @@ export const NewVisitScreen = ({ route, navigation }) => {
         }
     }, [businessTypeOpen]);
 
-    // Helper function with timeout and retry logic
-    const getCurrentLocation = (timeout = 10000, enableHighAccuracy = true) => {
-        return new Promise((resolve, reject) => {
-            const timeoutId = setTimeout(() => {
-                reject(new Error('Location request timed out'));
-            }, timeout);
+    // Small helper to wait between attempts
+    const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-            Location.getCurrentPositionAsync({
-                accuracy: enableHighAccuracy ? Location.Accuracy.High : Location.Accuracy.Low,
-                timeout: timeout,
-                maximumAge: 1000,
-            }).then((position) => {
-                clearTimeout(timeoutId);
-                resolve(position);
-            }).catch((error) => {
-                clearTimeout(timeoutId);
-                reject(error);
-            });
-        });
+    // Haversine distance for outlier filtering
+    const distanceMeters = (a, b) => {
+        const toRad = d => (d * Math.PI) / 180;
+        const R = 6371000;
+        const dLat = toRad(b.latitude - a.latitude);
+        const dLon = toRad(b.longitude - a.longitude);
+        const lat1 = toRad(a.latitude);
+        const lat2 = toRad(b.latitude);
+        const s = Math.sin(dLat / 2) ** 2 + Math.sin(dLon / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+        return 2 * R * Math.asin(Math.sqrt(s));
     };
 
-    const fetchCurrentPosition = async () => {
-        console.log(selectedType)
-        if (selectedType !== "Visit" && selectedType !== ""){
-            setLoading(false);
-            return null;
-        } 
 
+    // Pre-warm background attempt on mount (non-blocking)
+    //useEffect(() => { let cancelled = false; (async () => { try { await acquireStableLocation({ maxTotalMs: 5000, desiredAccuracyMeters: 500 }); } catch (_) { } if (cancelled) return; })(); return () => { cancelled = true; }; }, []);
+
+    async function getCurrentLocation(retries = 5) {
+        console.log(selectedType)
+        if (selectedType !== "Visit" && selectedType !== "") {
+            return null;
+        }
+
+        const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000));
+        try {
+            const geolocation = await Promise.race([
+                Location.getCurrentPositionAsync({
+                    enableHighAccuracy: true,
+                    accuracy: Location.Accuracy.Balanced,
+                }),
+                timeout,
+            ]);
+
+            if (geolocation && geolocation.coords) {
+                const { latitude, longitude, accuracy } = geolocation.coords;
+
+                const loc = `${latitude},${longitude}`;
+                console.log('Current position:', loc, 'accuracy(m):', accuracy);
+                return { location: loc, accuracy: accuracy };
+            } else {
+                throw new Error('Invalid position data');
+            }
+        } catch (error) {
+            if (error.message === 'Timeout' && retries > 0) {
+                console.log('Timeout occurred, retrying getCurrentPositionAsync');
+                await new Promise(r => setTimeout(r, 1000));
+                return await getCurrentLocation(retries - 1);
+            }
+            console.log('getCurrentLocation error', error);
+
+            if (error.message.includes('permission')) {
+                Alert.alert(i18n.t("error"), i18n.t("locationPermissionDenied"));
+            } else if (error.message.includes('timeout') || error.message === 'Timeout') {
+                Alert.alert(i18n.t("error"), i18n.t("locationUnavailable") + " - " + i18n.t("timeout"));
+            } else {
+                Alert.alert(i18n.t("error"), i18n.t("locationUnavailable"));
+            }
+            return null;
+        }
+    }
+
+    // Separate function for location fetching with its own loading state
+    const getCurrentLocationWithLoading = async () => {
         setLoading(true);
         setLoadingMessage(i18n.t("fetchingLocation"));
 
         try {
-            // Request location permissions
-            const { status } = await Location.requestForegroundPermissionsAsync();
-            if (status !== 'granted') {
-                Alert.alert(i18n.t("error"), i18n.t("locationPermissionDenied"));
-                return null;
-            }
-
-            let position;
-            try {
-                // First attempt with high accuracy and 10 second timeout
-                position = await getCurrentLocation(10000, true);
-            } catch (error) {
-                console.log('High accuracy location failed, retrying with low accuracy:', error.message);
-                try {
-                    // Retry with low accuracy and 15 second timeout
-                    position = await getCurrentLocation(15000, false);
-                } catch (retryError) {
-                    console.log('Low accuracy location also failed:', retryError.message);
-                    Alert.alert(i18n.t("error"), i18n.t("locationUnavailable"));
-                    return null;
-                }
-            }
-
-            if (position && position.coords) {
-                const loc = `${position.coords.latitude},${position.coords.longitude}`;
-                console.log('Current position:', loc);
-                setLocation(loc);
-                return loc;
-            } else {
-                Alert.alert(i18n.t("error"), i18n.t("locationUnavailable"));
-                return null;
-            }
-        } catch (error) {
-            console.log('Location fetch error:', error);
-            Alert.alert(i18n.t("error"), i18n.t("locationUnavailable"));
-            return null;
+            const result = await getCurrentLocation();
+            return result;
         } finally {
             setLoading(false);
             setLoadingMessage("");
         }
-    };
+    }
 
     useEffect(() => {
         (async () => {
             if (selectedType == "Visit") {
                 if (startLocation == "" || startLocation == undefined || startLocation == null) {
-                    const loc = await fetchCurrentPosition();
-                    if (loc) {
-                        setStartLocation(loc);
-                        console.log(loc);
+                    // Try up to 2 times to avoid empty startLocation
+                    for (let i = 0; i < 2; i++) {
+                        const loc = await getCurrentLocationWithLoading();
+                        if (loc) {
+                            setStartLocation(loc);
+                            console.log('Start location set:', loc);
+                            break;
+                        }
+                        // small pause before another attempt
+                        await delay(1200);
                     }
                 }
             }
             // Only set visitStartTime to current time if it wasn't loaded from visit details
-            if (visitStartTime == "" || visitStartTime == undefined || visitStartTime == null) {
+            if ((visitStartTime == "" || visitStartTime == undefined || visitStartTime == null) && (route.params.visitID == "" || route.params.visitID == undefined)) {
                 const result = await ServerOperations.getServerTime();
                 setVisitStartTime(result.res);
             }
@@ -264,8 +277,10 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
     useEffect(() => {
         (async () => {
+            console.log('=== Starting main useEffect ===');
             setLoading(true);
-            setLoadingMessage(i18n.t("loading"));
+            setLoadingMessage(i18n.t('loadingGettingUser'));
+            console.log('1. Getting current language and user...');
             const curLang = await Commons.getFromAS("lang");
             console.log(curLang);
             const curUser = await Commons.getFromAS("userID");
@@ -273,19 +288,47 @@ export const NewVisitScreen = ({ route, navigation }) => {
             setEmpType(type);
             setCurUser(curUser);
             setCurLang(curLang);
-            if (route.params.custID == "1") setIsHygex(true);
+
+            console.log('2. Setting customer details...');
+            // Set customer details
             setSelectedCust(route.params.custID);
+            setLoadingMessage(i18n.t('loadingCustomerDetails'));
             setSelectedCustName(route.params.custName);
             setSelectedCustPhone(route.params.phone);
             setSelectedCustBranch(route.params.branch);
+
+            console.log('3. Getting customer details...');
+            //fill cust equipments and contacts
+            if (route.params.custID != undefined && route.params.custID != "") {
+                const details = await ServerOperations.getCustomerDetails(route.params.custID, route.params.branch || selectedCustBranch);
+                if (details != null && details != "" && details != undefined && !isReadOnly) {
+                    setContactsList(details.CONTACTS);
+                    setCustomerEquipmentsList(details.EQUIPMENTS);
+                    setSelectedCustBusinessType(details.BUSINESS_TYPE);
+                }
+            }
+
+            console.log('4. Checking customer flags...');
+            // Check if this is Hygex customer and set flag
+            const isHygexCustomer = route.params.custID == "1";
+            if (isHygexCustomer) {
+                setIsHygex(true);
+                console.log('Hygex customer detected - checking location');
+            }
+
+            // Check if this is Notes Visit customer and set flag
+            const isNotesVisitCustomer = route.params.custID == "2";
+            if (isNotesVisitCustomer) {
+                setIsNotesVisit(true);
+                console.log('Notes Visit customer detected - no location check needed');
+            }
+
+            console.log('5. Getting business types...');
             const res2 = await ServerOperations.getBusinessTypes();
             if (res2) {
                 setBusinessTypesList(res2);
             }
 
-            if (route.params.branch != undefined && route.params.branch != "") {
-                setSelectedCustBranch(route.params.branch);
-            }
             if (route.params.pendingVisitID != undefined) {
                 setPendingVisitId(route.params.pendingVisitID);
                 console.log(route.params.pendingVisitID)
@@ -300,7 +343,19 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 const currentDate = moment().format('DD/MM/YYYY');
                 const canEditRes = await ServerOperations.canEditVisit(route.params.visitID, curUser, currentDate);
                 if (res != null && res != "" && res != undefined) {
-                    setAddedDepartmentsList(res.DEPARTMENTS);
+                    // Process departments and actions to handle multiple attachments
+                    const processedDepartments = res.DEPARTMENTS?.map(department => ({
+                        ...department,
+                        ACTIONS: department.ACTIONS?.map(action => ({
+                            ...action,
+                            // Convert attachment string to ATTACHMENTS array if it contains separators
+                            ATTACHMENTS: action.ATTACHMENT && action.ATTACHMENT.includes('@@')
+                                ? action.ATTACHMENT.split('@@')
+                                : action.ATTACHMENT ? [action.ATTACHMENT] : []
+                        })) || []
+                    })) || [];
+
+                    setAddedDepartmentsList(processedDepartments);
                     setAddedRequestsList(res.REQUESTS);
                     //setCheckedActionsList(res.ACTIONS)
                     setSelectedVisitType(res.TYPE);
@@ -312,13 +367,17 @@ export const NewVisitScreen = ({ route, navigation }) => {
                         setCallEnded(false);
                     }
                     setSelectedType(res.VISIT_CALL);
-                    setStartLocation(res.START_LOCATION);
+                    // setStartLocation(res.START_LOCATION);
+                    // Handle visit attachments - check both ATTACHMENTS and ATTACHMENT fields
+                    const visitAttachmentsString = res.ATTACHMENTS || res.ATTACHMENT || "";
+                    setVisitAttachments(visitAttachmentsString && visitAttachmentsString.trim() !== "" ? visitAttachmentsString.split("@@") : []);
+                    setVisitNotes(res.NOTES || "");
                     // Set visitStartTime from visit details if available
                     if (res.START_TIME && res.START_TIME !== "") {
                         setVisitStartTime(res.START_TIME);
                     }
                     if (canEditRes.res) { setIsReadOnly(false); setIgnoreLoc(true); } else { setIsReadOnly(true) };
-                    if (res.VISIT_CALL == "Visit") await checkLocationDistance(res.CUSTOMER);
+                    if (res.VISIT_CALL == "Visit" && canEditRes.res) await checkLocationDistance(res.CUSTOMER || route.params.custID, res.BRANCH || route.params.branch);
 
                 }
             }
@@ -328,62 +387,234 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 setIsReadOnly(false);
             }
 
-            const deps = await ServerOperations.getDepartments();
-            if (deps != null && deps != "" && deps != undefined) {
-                setDepartmentsList(deps);
-                setFilteredDepartmentsList(deps);
-            }
-            const reqs = await ServerOperations.getReqActions(type);
-            if (reqs != null && reqs != "" && reqs != undefined) {
-                setRequestsList(reqs);
-                setFilteredRequestsList(reqs);
-            }
-            const acts = await ServerOperations.getActions(type, 'Existing');
-            if (acts != null && acts != "" && acts != undefined) {
-                setActionsList(acts);
-            }
-            const visits = await ServerOperations.getCustomerVisits(route.params.custID, "Existing");
-            if (visits != null && visits != "" && visits != undefined) {
-                setCustomerVisits(visits);
-                setFilteredCustomerVisits(visits);
-            }
-            
-            // Only check location distance if this is a new visit or if selectedType is "Visit"
-            if (selectedType === "Visit" || route.params.custID === "1") {
-                await checkLocationDistance(route.params.custID);
+            try {
+                setLoadingMessage(i18n.t('loadingDepartments'));
+                const deps = await ServerOperations.getDepartments();
+                if (deps != null && deps != "" && deps != undefined) {
+                    setDepartmentsList(deps);
+                    setFilteredDepartmentsList(deps);
+                    console.log('Departments loaded successfully:', deps.length);
+                } else {
+                    console.log('Failed to load departments - received:', deps);
+                    setDepartmentsList([]);
+                    setFilteredDepartmentsList([]);
+                }
+            } catch (error) {
+                console.error('Error loading departments:', error);
+                setDepartmentsList([]);
+                setFilteredDepartmentsList([]);
             }
 
-            const equipments = await ServerOperations.getEquipments();
-            if (equipments != null && equipments != "" && equipments != undefined) {
-                setDefaultEquipmentsList(equipments);
+            try {
+                setLoadingMessage(i18n.t('loadingRequests'));
+                const reqs = await ServerOperations.getReqActions(type);
+                if (reqs != null && reqs != "" && reqs != undefined) {
+                    setRequestsList(reqs);
+                    setFilteredRequestsList(reqs);
+                    console.log('Request actions loaded successfully:', reqs.length);
+                } else {
+                    console.log('Failed to load request actions - received:', reqs);
+                    setRequestsList([]);
+                    setFilteredRequestsList([]);
+                }
+            } catch (error) {
+                console.error('Error loading request actions:', error);
+                setRequestsList([]);
+                setFilteredRequestsList([]);
             }
+
+            try {
+                setLoadingMessage(i18n.t('loadingActions'));
+                const acts = await ServerOperations.getActions(type, 'Existing');
+                if (acts != null && acts != "" && acts != undefined) {
+                    setActionsList(acts);
+                    console.log('Actions loaded successfully:', acts.length);
+                } else {
+                    console.log('Failed to load actions - received:', acts);
+                }
+            } catch (error) {
+                console.error('Error loading actions:', error);
+            }
+
+            try {
+                setLoadingMessage(i18n.t('loadingVisits'));
+                const visits = await ServerOperations.getCustomerVisits(route.params.custID, "Existing", route.params.branch || selectedCustBranch);
+                if (visits != null && visits != "" && visits != undefined) {
+                    setCustomerVisits(visits);
+                    setFilteredCustomerVisits(visits);
+                    console.log('Customer visits loaded successfully:', visits.length);
+                }
+            } catch (error) {
+                console.error('Error loading customer visits:', error);
+            }
+
+            try {
+                setLoadingMessage(i18n.t('loadingEquipments'));
+                const equipments = await ServerOperations.getEquipments();
+                if (equipments != null && equipments != "" && equipments != undefined) {
+                    setDefaultEquipmentsList(equipments);
+                    console.log('Equipments loaded successfully:', equipments.length);
+                } else {
+                    console.log('Failed to load equipments - received:', equipments);
+                }
+            } catch (error) {
+                console.error('Error loading equipments:', error);
+            }
+
+            console.log('13. Final location checks...');
+            // For Hygex customers (custID "1"), always check location regardless of visit type
+            // For Notes Visit customers (custID "2"), skip location check
+            // For other customers, only check location if selectedType is "Visit"
+            setLoadingMessage(i18n.t('loadingLocationCheck'));
+            if (isHygexCustomer) {
+                console.log('Checking location for Hygex customer');
+                await checkLocationDistance("1", route.params.branch || selectedCustBranch);
+            } else if (selectedType === "Visit" && !isNotesVisitCustomer) {
+                await checkLocationDistance(route.params.custID, route.params.branch || selectedCustBranch);
+            }
+
+            console.log('=== Finished main useEffect ===');
             setLoading(false);
         })();
-    }, [route.params.visitID, selectedType]);
+    }, [route.params.visitID, route.params.custID]);
 
-    const checkLocationDistance = async (custID) => {
-        const details = await ServerOperations.getCustomerDetails(custID);
+    // Separate useEffect to handle location checking when selectedType changes for non-Hygex customers
+    useEffect(() => {
+        (async () => {
+            // Only check location for non-Hygex and non-NotesVisit customers when selectedType changes to "Visit"
+            if (selectedType === "Visit" && route.params.custID !== "1" && route.params.custID !== "2" && !isReadOnly) {
+                await checkLocationDistance(route.params.custID, selectedCustBranch || route.params.branch);
+            }
+        })();
+    }, [selectedType]);
+
+    const checkLocationDistance = async (custID, branch) => {
+        const details = await ServerOperations.getCustomerDetails(custID, branch);
         if (details != null && details != "" && details != undefined && !isReadOnly) {
             setContactsList(details.CONTACTS);
             setCustomerEquipmentsList(details.EQUIPMENTS);
             setSelectedCustBusinessType(details.BUSINESS_TYPE);
             const customerLoc = details.LOCATION;
-            const curLoc = await fetchCurrentPosition();
-            console.log(customerLoc, curLoc);
+            const curLoc = await getCurrentLocation();
+            console.log(customerLoc);
+            if (customerLoc == "") return;
             if (curLoc && customerLoc && !ignoreLoc) {
                 const [curLat, curLon] = curLoc.split(',').map(Number);
                 const [custLat, custLon] = customerLoc.split(',').map(Number);
                 const distance = Commons.calculateDistance(curLat, curLon, custLat, custLon);
                 console.log('Distance:', distance);
-                if (distance > 0.3) {
-                    Alert.alert(i18n.t("error"), i18n.t("mustBeInLocation"));
+
+                // For Hygex customers (custID "1"), allow only 200 meters instead of 750
+                const maxDistance = custID === "1" ? 0.2 : 0.75;
+                if (distance > maxDistance) {
+                    const distanceInMeters = Math.round(distance * 1000);
+                    Alert.alert(i18n.t("error"), i18n.t("mustBeInLocation") + ` تبعد (${distanceInMeters}متر)`);
                     navigation.goBack();
                 }
             }
         }
     }
 
+    // Refetch functions to avoid code duplication
+    const refetchDepartments = async () => {
+        console.log('Departments list is empty, attempting to refetch...');
+        setLoading(true);
+        setLoadingMessage(i18n.t("loading"));
+        try {
+            const deps = await ServerOperations.getDepartments();
+            if (deps != null && deps != "" && deps != undefined) {
+                setDepartmentsList(deps);
+                setFilteredDepartmentsList(deps);
+                console.log('Departments refetched successfully:', deps.length);
+                return true;
+            } else {
+                console.log('Refetch failed - received:', deps);
+                Alert.alert(i18n.t("error"), "Failed to load departments. Please try again.");
+                return false;
+            }
+        } catch (error) {
+            console.error('Error refetching departments:', error);
+            Alert.alert(i18n.t("error"), "Failed to load departments. Please check your connection and try again.");
+            return false;
+        } finally {
+            setLoading(false);
+            setLoadingMessage("");
+        }
+    };
+
+    const refetchRequestActions = async () => {
+        console.log('Requests list is empty, attempting to refetch...');
+        setLoading(true);
+        setLoadingMessage(i18n.t("loading"));
+        try {
+            const type = await Commons.getFromAS("type");
+            const reqs = await ServerOperations.getReqActions(type);
+            if (reqs != null && reqs != "" && reqs != undefined) {
+                setRequestsList(reqs);
+                setFilteredRequestsList(reqs);
+                console.log('Requests refetched successfully:', reqs.length);
+                return true;
+            } else {
+                console.log('Refetch failed - received:', reqs);
+                Alert.alert(i18n.t("error"), "Failed to load request actions. Please try again.");
+                return false;
+            }
+        } catch (error) {
+            console.error('Error refetching request actions:', error);
+            Alert.alert(i18n.t("error"), "Failed to load request actions. Please check your connection and try again.");
+            return false;
+        } finally {
+            setLoading(false);
+            setLoadingMessage("");
+        }
+    };
+
+    const refetchActions = async () => {
+        console.log('Actions list is empty, attempting to refetch...');
+        try {
+            const type = await Commons.getFromAS("type");
+            const acts = await ServerOperations.getActions(type, 'Existing');
+            if (acts != null && acts != "" && acts != undefined) {
+                setActionsList(acts);
+                console.log('Actions refetched successfully:', acts.length);
+                return acts;
+            } else {
+                console.log('Actions refetch failed - received:', acts);
+                return [];
+            }
+        } catch (error) {
+            console.error('Error refetching actions:', error);
+            return [];
+        }
+    };
+
+    const refetchEquipments = async () => {
+        console.log('Equipments list is empty, attempting to refetch...');
+        setLoading(true);
+        setLoadingMessage(i18n.t("loading"));
+        try {
+            const equipments = await ServerOperations.getEquipments();
+            if (equipments != null && equipments != "" && equipments != undefined) {
+                setDefaultEquipmentsList(equipments);
+                console.log('Equipments refetched successfully:', equipments.length);
+                return true;
+            } else {
+                console.log('Equipments refetch failed - received:', equipments);
+                return false;
+            }
+        } catch (error) {
+            console.error('Error refetching equipments:', error);
+            return false;
+        } finally {
+            setLoading(false);
+            setLoadingMessage("");
+        }
+    };
+
     const saveVisitValidation = () => {
+        if (selectedType == "Price Offer") {
+            return true;
+        }
         if (addedDepartmentsList.length === 0 && addedRequestsList.length === 0) {
             setLoading(false);
             Alert.alert(i18n.t("error"), i18n.t("noDepartmentsOrRequestsError"));
@@ -404,76 +635,231 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
 
     const saveVisit = async () => {
+        // Prevent multiple calls by checking if already loading
+        if (loading) {
+            return;
+        }
+        setLoading(true);
+        setLoadingMessage(i18n.t("saving"));
         try {
-            setLoading(true);
-            if (!isHygex) {
+            if (!isHygex && !isNotesVisit) {
                 const valid = saveVisitValidation();
                 if (!valid) return;
             }
 
-            let addedDeps = [];
-            addedDeps = addedDepartmentsList.map(department => ({
-                ...department,
-                ACTIONS: department.ACTIONS.filter(action => action.IS_CHECKED || action.EXPECTED_DATE)
-            }));
-            addedDeps.forEach(department => {
-                department.ACTIONS.forEach(action => {
-                    action.IS_CHECKED = action.IS_CHECKED ? "Y" : "N";
-                    if (action.EQUIPMENTS) {
-                        action.EQUIPMENTS.forEach(equipment => {
-                            equipment.isEmpty = equipment.isEmpty ? "Y" : "N";
-                        });
-                    }
-                    console.log(action.EQUIPMENTS);
-                });
-            });
+            // Validation for isNotesVisit - check if both notes and attachments are empty
+            if (isNotesVisit) {
+                if ((visitNotes.trim() === "" || visitNotes.trim() === null || visitNotes.trim() === undefined) &&
+                    (visitAttachments.length === 0)) {
+                    setLoading(false);
+                    Alert.alert(i18n.t("error"), i18n.t("emptyNotesAndAttachmentsError"));
+                    return;
+                }
+            }
 
-            // Process request equipments
+            // Ensure startLocation is set for Visit type (except Notes Visit customer "2")
+            if (selectedType === "Visit" && route.params.custID !== "2") {
+                if (!startLocation || startLocation === "" || startLocation === undefined) {
+                    setLoadingMessage(i18n.t("fetchingLocation"));
+                    const loc = await getCurrentLocation();
+                    if (loc) {
+                        setStartLocation(loc);
+                    }
+                }
+            }
+
+            // Check location distance before saving (only for Visit type and exclude NotesVisit customers)
+            if (selectedType === "Visit" && !isNotesVisit) {
+                setLoadingMessage(i18n.t("fetchingLocation"));
+                try {
+                    await checkLocationDistance(selectedCust, selectedCustBranch || route.params.branch);
+                } catch (error) {
+                    console.log('Location check failed during save:', error);
+                    // If location check fails, still continue unless the user is redirected back
+                    // The checkLocationDistance function handles showing alerts and navigation
+                }
+            }
+
+            setLoadingMessage(i18n.t("saving"));
+
+            let addedDeps = [];
             let processedRequestsList = [];
-            processedRequestsList = addedRequestsList.map(request => ({
-                ...request,
-                EQUIPMENTS: request.EQUIPMENTS ? request.EQUIPMENTS.map(equipment => ({
-                    ...equipment,
-                    isEmpty: equipment.isEmpty ? "Y" : "N"
-                })) : []
-            }));
+
+            if (isNotesVisit) {
+                // For Notes Visit, don't add to departments - keep them empty
+                addedDeps = [];
+                processedRequestsList = [];
+            } else {
+                addedDeps = addedDepartmentsList.map(department => ({
+                    ...department,
+                    ACTIONS: department.ACTIONS.filter(action => action.IS_CHECKED || action.EXPECTED_DATE)
+                }));
+                addedDeps.forEach(department => {
+                    department.ACTIONS.forEach(action => {
+                        action.IS_CHECKED = action.IS_CHECKED ? "Y" : "N";
+                        if (action.EQUIPMENTS) {
+                            action.EQUIPMENTS.forEach(equipment => {
+                                equipment.isEmpty = equipment.isEmpty ? "Y" : "N";
+                            });
+                        }
+                        // Handle multiple attachments - convert array to string with separator
+                        if (action.ATTACHMENTS && action.ATTACHMENTS.length > 0) {
+                            action.ATTACHMENT = action.ATTACHMENTS.join('@@');
+                        }
+                        console.log(action.EQUIPMENTS);
+                    });
+                });
+
+                // Process request equipments
+                processedRequestsList = addedRequestsList.map(request => ({
+                    ...request,
+                    EQUIPMENTS: request.EQUIPMENTS ? request.EQUIPMENTS.map(equipment => ({
+                        ...equipment,
+                        isEmpty: equipment.isEmpty ? "Y" : "N"
+                    })) : []
+                }));
+            }
+
             console.log(JSON.stringify(addedDeps));
             console.log(JSON.stringify(processedRequestsList));
 
 
-            setLoadingMessage(i18n.t("fetchingLocation"));
-            const endLocation = await fetchCurrentPosition();
-            setLoadingMessage(i18n.t("loading"));
+            let endLocation;
+            if (isNotesVisit) {
+                // For Notes Visit, skip location fetching
+                endLocation = "";
+            } else {
+                if (selectedType == "Visit") {
+                    try { await checkLocationDistance(selectedCust, selectedCustBranch || route.params.branch); } catch (e) { console.log('Distance check failed', e); }
+                }
+            }
+            setLoadingMessage(i18n.t("saving"));
+
+            // Prepare attachments string for isNotesVisit
+            let atts = "";
+            if (isNotesVisit && visitAttachments.length > 0) {
+                atts = visitAttachments.join('@@');
+            }
+
             // console.log(JSON.stringify(addedRequestsList))
-            const response = await ServerOperations.saveVisit(
-                selectedType,
-                selectedVisitType,
-                callDuration,
-                JSON.stringify(addedDeps),
-                JSON.stringify(processedRequestsList),
-                curUser,
-                selectedCust,
-                "Existing",
-                visitID,
-                "",
-                "",
-                startLocation,
-                endLocation,
-                pendingVisitId,
-                pendingReqId,
-                selectedCustBranch,
-                visitStartTime
-            );
-            setLoading(false);
-            if (response != null && response != "" && response != undefined) {
+            console.log('About to call ServerOperations.saveVisit...');
+            // Check if there's a pending request ID and ask user about its status
+            let requestStatus = ""; // Default status
+            if (pendingReqId && pendingReqId !== "") {
+                setLoading(false);
+                const userChoice = await new Promise((resolve) => {
+                    Alert.alert(
+                        i18n.t("pendingRequest"),
+                        i18n.t("isPendingRequestDone"),
+                        [
+                            {
+                                text: i18n.t("keepPending"),
+                                onPress: () => resolve("")
+                            },
+                            {
+                                text: i18n.t("markAsDone"),
+                                onPress: () => resolve("Y")
+                            }
+                        ],
+                        { cancelable: false }
+                    );
+                });
+                requestStatus = userChoice;
+                setLoading(true);
+                setLoadingMessage(i18n.t("saving"));
+            }
+
+            // Continue with normal save operation using requestStatus variable
+            let response;
+            try {
+                response = await ServerOperations.saveVisit(
+                    selectedType,
+                    selectedVisitType,
+                    callDuration,
+                    JSON.stringify(addedDeps),
+                    JSON.stringify(processedRequestsList),
+                    curUser,
+                    selectedCust,
+                    "Existing",
+                    visitID,
+                    "",
+                    "",
+                    startLocation,
+                    endLocation,
+                    pendingVisitId,
+                    pendingReqId,
+                    selectedCustBranch,
+                    visitStartTime,
+                    visitNotes,
+                    atts,
+                    requestStatus
+                );
+            } catch (apiError) {
+                // If the API call itself failed, show specific error
+                if (apiError.message && apiError.message.includes('Network')) {
+                    Alert.alert(
+                        i18n.t("error"),
+                        i18n.t("unexpectedErrorVisitMaybeSaved"),
+                        [
+                            { text: i18n.t("ok"), onPress: () => navigation.goBack() }
+                        ]
+                    );
+                } else {
+                    Alert.alert(
+                        i18n.t("error"),
+                        i18n.t("unexpectedErrorVisitMaybeSaved"),
+                        [
+                            { text: i18n.t("ok"), onPress: () => navigation.goBack() }
+                        ]
+                    );
+                }
+                return;
+            }            // Validate response exists and has expected structure
+            if (!response) {
+                console.warn('Invalid response received from saveVisit:', response);
+                Alert.alert(
+                    i18n.t("error"),
+                    i18n.t("unexpectedErrorVisitMaybeSaved"),
+                    [
+                        { text: i18n.t("ok"), onPress: () => navigation.goBack() }
+                    ]
+                );
+                return;
+            }
+
+            // Check for successful response
+            if (response.res === true) {
+                console.log('Visit saved successfully, VISIT_ID:', response.VISIT_ID);
                 Alert.alert(i18n.t("visitSavedSuccessfully"), i18n.t("visitNo") + " " + response.VISIT_ID);
                 navigation.goBack();
+            } else if (response.res === false) {
+                console.log('Visit save failed, response.msg:', response.msg);
+                Alert.alert(i18n.t("error"), response.msg || i18n.t("visitSaveFailed"));
             } else {
-                Alert.alert(i18n.t("error"), response.message || i18n.t("visitSaveFailed"));
+                // Handle cases where response.res is neither true nor false
+                console.warn('Ambiguous response.res value:', response.res, 'Full response:', response);
+                Alert.alert(
+                    i18n.t("error"),
+                    i18n.t("unexpectedErrorVisitMaybeSaved"),
+                    [
+                        { text: i18n.t("ok"), onPress: () => navigation.goBack() }
+                    ]
+                );
             }
         } catch (error) {
+            console.error('Unexpected error in saveVisit:', error);
+
+            // Provide user-friendly error message for unexpected errors
+            Alert.alert(
+                i18n.t("error"),
+                i18n.t("unexpectedErrorVisitMaybeSaved"),
+                [
+                    { text: i18n.t("ok"), onPress: () => navigation.goBack() }
+                ]
+            );
+        } finally {
             setLoading(false);
-            Alert.alert(i18n.t("error"), i18n.t("visitSaveFailed"));
+            setLoadingMessage("");
         }
     };
 
@@ -513,8 +899,6 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
     const handleSaveEquipments = () => {
         // Check if any equipment is already in the action's equipment list
-
-
         const actionIndex = checkedActionsList.findIndex(act => act.ID === selectedAction);
         if (actionIndex !== -1) {
             const updatedActions = [...checkedActionsList];
@@ -572,10 +956,8 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
     const handleAttachmentPress = (attachment) => {
         const uri = Constants.attachmentPath + "/" + attachment;
-        console.log(uri);
-        Linking.openURL(
-            uri
-        )
+        console.log('Open attachment', uri);
+        Commons.openAttachment(uri);
     };
 
     // const previewImage = (uri) => {
@@ -584,14 +966,18 @@ export const NewVisitScreen = ({ route, navigation }) => {
     // };
 
     const addReqActionValidations = () => {
+        // Check if notes are required and missing
         if (reqDetailsNotes.trim() === "" && selectedRequestNotesRequired === "Y") {
             Alert.alert(i18n.t("error"), i18n.t("emptyNotesError"));
             return false;
         }
-        if (reqDetailsAttachment.trim() === "") {
-            Alert.alert(i18n.t("error"), i18n.t("missingAttachmentsError"));
+
+        // Check if request has either notes or attachments (at least one is required)
+        if (reqDetailsNotes.trim() === "" && reqDetailsAttachment.trim() === "") {
+            Alert.alert(i18n.t("error"), i18n.t("emptyNotesAndAttachmentsError"));
             return false;
         }
+
         if (reqDetailsDepartments === null || reqDetailsDepartments.length === 0) {
             Alert.alert(i18n.t("error"), i18n.t("missingDepartmentError"));
             return false;
@@ -624,19 +1010,21 @@ export const NewVisitScreen = ({ route, navigation }) => {
     };
 
     const handleReqEquipmentNotesChange = (itemEqNo, text) => {
-        const updatedEquipments = selectedReqEquipments.map(eq => {
-            if (eq.EQ_NO === itemEqNo) {
-                return { ...eq, notes: text };
-            }
-            return eq;
-        });
-        setSelectedReqEquipments(updatedEquipments);
+        setSelectedReqEquipments(prevEquipments =>
+            prevEquipments.map(eq => {
+                if (eq.EQ_NO === itemEqNo) {
+                    return { ...eq, notes: text };
+                }
+                return eq;
+            })
+        );
     };
 
     const addActionValidations = () => {
         const emptyNotesAndAttachments = checkedActionsList.some(action =>
             (action.IS_CHECKED || action.EXPECTED_DATE.trim() !== "") &&
             action.NOTES.trim() === "" &&
+            (!action.ATTACHMENTS || action.ATTACHMENTS.length === 0) &&
             !action.ATTACHMENT
         );
         if (emptyNotesAndAttachments) {
@@ -664,11 +1052,38 @@ export const NewVisitScreen = ({ route, navigation }) => {
     }
 
     const renderCustomerEquipmentsModal = () => {
+        // Refresh handler for customer equipments
+        const refreshCustomerEquipments = async () => {
+            setLoading(true);
+            setLoadingMessage(i18n.t("loading"));
+            try {
+                const details = await ServerOperations.getCustomerDetails(selectedCust, selectedCustBranch);
+                if (details && Array.isArray(details.EQUIPMENTS)) {
+                    setCustomerEquipmentsList(details.EQUIPMENTS);
+                } else {
+                    setCustomerEquipmentsList([]);
+                }
+            } catch (err) {
+                console.error('Failed to refresh customer equipments:', err);
+                Alert.alert(i18n.t('error'), i18n.t('loading'));
+            } finally {
+                setLoading(false);
+                setLoadingMessage("");
+            }
+        };
+
         return (
             <Modal visible={showCustomerEquipmentsModal} onDismiss={() => setShowCustomerEquipmentsModal(false)} contentContainerStyle={styles.modalStyle}>
-                <Text style={styles.modalTitle}>
-                    {i18n.t("equipments")}
-                </Text>
+                <View style={{ width: '100%', backgroundColor: Constants.appColor, paddingVertical: 10, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' }}>
+                    <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>{i18n.t("equipments")}</Text>
+                    <TouchableOpacity
+                        onPress={refreshCustomerEquipments}
+                        style={curLang == 'ar' ? { position: 'absolute', left: 12 } : { position: 'absolute', right: 12 }}
+                        accessibilityLabel={i18n.t('refresh')}
+                    >
+                        <Ionicons name="refresh" size={22} color="white" />
+                    </TouchableOpacity>
+                </View>
                 <FlatList
                     keyExtractor={(item) => item.EQ_NO}
                     data={customerEquipmentsList}
@@ -690,173 +1105,218 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
     const renderEquipmentsModal = () => {
         return (
-            <Modal
-                visible={showEquipmentsModal}
-                onDismiss={() => setShowEquipmentsModal(false)}
-                contentContainerStyle={styles.modalStyle}
+            <KeyboardAvoidingView
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                style={{ flex: 1 }}
+                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
             >
-                <TextInput
-                    placeholder={i18n.t("search")}
-                    clearButtonMode="always"
-                    style={styles.searchBox}
-                    value={searchText}
-                    onChangeText={(text) => {
-                        setSearchText(text);
-                        const filteredList = Commons.handleSearch(text, equipmentsList);
-                        setFilteredEquipmentsList(filteredList);
-                    }}
-                />
-                <Text style={styles.modalTitle}>
-                    {i18n.t("equipments")}
-                </Text>
-                <FlatList
-                    keyExtractor={(item) => item.EQ_NO}
-                    data={filteredEquipmentsList}
-                    extraData={selectedEquipments}
-                    renderItem={({ item }) => {
-                        const existingEquipment = selectedEquipments.find(eq => eq.EQ_NO === item.EQ_NO);
-                        return (
-                            <TouchableOpacity
-                                onPress={() => { handleEquipmentPress(item) }}
-                                style={{
-                                    padding: 15,
-                                    borderWidth: 0.5,
-                                    borderRadius: 5,
-                                    marginBottom: 5,
-                                    backgroundColor: existingEquipment ? '#ececec' : 'white'
-                                }}
-                            >
-                                <Text style={{ color: "red", alignSelf: 'center' }}>{item.EQ_NO}</Text>
-                                <Text style={{ alignSelf: 'center', marginTop: 10 }}>
-                                    {curLang == "en" ? item.EN_DESC : item.AR_DESC}
-                                </Text>
-                                {existingEquipment && (
-                                    <>
-                                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
-                                            <Text>{i18n.t("isEmpty")}</Text>
-                                            <RadioButton
-                                                value="empty"
-                                                status={existingEquipment.isEmpty ? 'checked' : 'unchecked'}
-                                                onPress={() => {
-                                                    const updatedEquipments = selectedEquipments.map(eq => {
-                                                        if (eq.EQ_NO === item.EQ_NO) {
-                                                            return { ...eq, isEmpty: !eq.isEmpty };
-                                                        }
-                                                        return eq;
-                                                    });
-                                                    setSelectedEquipments(updatedEquipments);
-                                                }}
-                                            />
-                                        </View>
-                                        <TextInput
-                                            placeholder={i18n.t("notes")}
-                                            disabled={isReadOnly}
-                                            multiline={true}
-                                            style={{ marginTop: 10, borderWidth: 0.5, borderRadius: 5, padding: 5 }}
-                                            value={existingEquipment.notes || ''}
-                                            onChangeText={(text) => {
-                                                const updatedEquipments = selectedEquipments.map(eq => {
-                                                    if (eq.EQ_NO === item.EQ_NO) {
-                                                        return { ...eq, notes: text };
-                                                    }
-                                                    return eq;
-                                                });
-                                                setSelectedEquipments(updatedEquipments);
-                                            }}
-                                        />
-                                    </>
-                                )}
-                            </TouchableOpacity>
-                        );
-                    }}
-                />
-                <View style={{ flexDirection: "row-reverse" }}>
-                    <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={handleSaveEquipments}>
-                        <Text style={styles.text}>{i18n.t("save")}</Text>
-                    </Button>
-                    <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => setShowEquipmentsModal(false)}>
-                        <Text style={styles.text}>{i18n.t("back")}</Text>
-                    </Button>
-                </View>
-            </Modal>
+                <Modal
+                    visible={showEquipmentsModal}
+                    onDismiss={() => setShowEquipmentsModal(false)}
+                    contentContainerStyle={[styles.modalStyle, { height: '100%', justifyContent: 'space-between' }]}
+                >
+                    <TextInput
+                        placeholder={i18n.t("search")}
+                        clearButtonMode="always"
+                        style={styles.searchBox}
+                        value={searchText}
+                        onChangeText={(text) => {
+                            setSearchText(text);
+                            const filteredList = Commons.handleSearch(text, equipmentsList);
+                            setFilteredEquipmentsList(filteredList);
+                        }}
+                    />
+                    <View style={{ flex: 1 }}>
+                        <Text style={styles.modalTitle}>
+                            {i18n.t("equipments")}
+                        </Text>
+                        <FlatList
+                            keyExtractor={(item) => item.EQ_NO}
+                            data={filteredEquipmentsList}
+                            extraData={selectedEquipments}
+                            style={{ flex: 1 }}
+                            contentContainerStyle={{ paddingBottom: 10 }}
+                            renderItem={({ item }) => {
+                                const existingEquipment = selectedEquipments.find(eq => eq.EQ_NO === item.EQ_NO);
+                                return (
+                                    <TouchableOpacity
+                                        onPress={() => { handleEquipmentPress(item) }}
+                                        style={{
+                                            padding: 15,
+                                            borderWidth: 0.5,
+                                            borderRadius: 5,
+                                            marginBottom: 5,
+                                            backgroundColor: existingEquipment ? '#ececec' : 'white'
+                                        }}
+                                    >
+                                        <Text style={{ color: "red", alignSelf: 'center' }}>{item.EQ_NO}</Text>
+                                        <Text style={{ alignSelf: 'center', marginTop: 10 }}>
+                                            {curLang == "en" ? item.EN_DESC : item.AR_DESC}
+                                        </Text>
+                                        {existingEquipment && (
+                                            <>
+                                                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
+                                                    <Text>{i18n.t("isEmpty")}</Text>
+                                                    <RadioButton
+                                                        value="empty"
+                                                        status={existingEquipment.isEmpty ? 'checked' : 'unchecked'}
+                                                        onPress={() => {
+                                                            const updatedEquipments = selectedEquipments.map(eq => {
+                                                                if (eq.EQ_NO === item.EQ_NO) {
+                                                                    return { ...eq, isEmpty: !eq.isEmpty };
+                                                                }
+                                                                return eq;
+                                                            });
+                                                            setSelectedEquipments(updatedEquipments);
+                                                        }}
+                                                    />
+                                                </View>
+                                                <TextInput
+                                                    key={`equipment-notes-${item.EQ_NO}`}
+                                                    placeholder={i18n.t("notes")}
+                                                    disabled={isReadOnly}
+                                                    multiline={true}
+                                                    defaultValue={existingEquipment.notes || ''}
+                                                    onChangeText={(text) => {
+                                                        setSelectedEquipments(prevEquipments =>
+                                                            prevEquipments.map(eq => {
+                                                                if (eq.EQ_NO === item.EQ_NO) {
+                                                                    return { ...eq, notes: text };
+                                                                }
+                                                                return eq;
+                                                            })
+                                                        );
+                                                    }}
+                                                    textAlign="left"
+                                                    textAlignVertical="top"
+                                                    style={{
+                                                        marginTop: 10,
+                                                        minHeight: 40,
+                                                        paddingHorizontal: 10,
+                                                        paddingVertical: 8,
+                                                        borderWidth: 1,
+                                                        borderColor: '#ccc',
+                                                        borderRadius: 4,
+                                                        backgroundColor: '#fff'
+                                                    }}
+                                                />
+                                            </>
+                                        )}
+                                    </TouchableOpacity>
+                                );
+                            }}
+                        />
+                    </View>
+                    <View style={{ flexDirection: "row-reverse", paddingTop: 10 }}>
+                        <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={handleSaveEquipments}>
+                            <Text style={styles.text}>{i18n.t("save")}</Text>
+                        </Button>
+                        <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => setShowEquipmentsModal(false)}>
+                            <Text style={styles.text}>{i18n.t("back")}</Text>
+                        </Button>
+                    </View>
+                </Modal>
+            </KeyboardAvoidingView>
         );
     };
 
     const renderReqEquipmentsModal = () => {
         return (
-            <Modal
-                visible={showReqEquipmentsModal}
-                onDismiss={() => setShowReqEquipmentsModal(false)}
-                contentContainerStyle={styles.modalStyle}
+            <KeyboardAvoidingView
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                style={{ flex: 1 }}
+                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
             >
-                <TextInput
-                    placeholder={i18n.t("search")}
-                    clearButtonMode="always"
-                    style={styles.searchBox}
-                    value={searchText}
-                    onChangeText={(text) => {
-                        setSearchText(text);
-                        const filteredList = Commons.handleSearch(text, defaultEquipmentsList);
-                        setFilteredEquipmentsList(filteredList);
-                    }}
-                />
-                <Text style={styles.modalTitle}>
-                    {i18n.t("equipments")}
-                </Text>
-                <FlatList
-                    keyExtractor={(item) => item.EQ_NO}
-                    data={filteredEquipmentsList}
-                    extraData={selectedReqEquipments}
-                    renderItem={({ item }) => {
-                        const existingEquipment = selectedReqEquipments.find(eq => eq.EQ_NO === item.EQ_NO);
-                        return (
-                            <TouchableOpacity
-                                onPress={() => handleReqEquipmentPress(item)}
-                                style={{
-                                    padding: 15,
-                                    borderWidth: 0.5,
-                                    borderRadius: 5,
-                                    marginBottom: 5,
-                                    backgroundColor: existingEquipment ? '#ececec' : 'white'
-                                }}
-                            >
-                                <Text style={{ color: "red", alignSelf: 'center' }}>{item.EQ_NO}</Text>
-                                <Text style={{ alignSelf: 'center', marginTop: 10 }}>
-                                    {curLang == "en" ? item.EN_DESC : item.AR_DESC}
-                                </Text>
-                                {existingEquipment && (
-                                    <>
-                                        <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
-                                            <Text>{i18n.t("isEmpty")}</Text>
-                                            <RadioButton
-                                                value="empty"
-                                                status={existingEquipment.isEmpty ? 'checked' : 'unchecked'}
-                                                onPress={() => handleReqEquipmentEmptyChange(item.EQ_NO)}
-                                            />
-                                        </View>
-                                        <TextInput
-                                            placeholder={i18n.t("notes")}
-                                            disabled={isReadOnly}
-                                            multiline={true}
-                                            style={{ marginTop: 10, borderWidth: 0.5, borderRadius: 5, padding: 5 }}
-                                            value={existingEquipment.notes || ''}
-                                            onChangeText={(text) => handleReqEquipmentNotesChange(item.EQ_NO, text)}
-                                        />
-                                    </>
-                                )}
-                            </TouchableOpacity>
-                        );
-                    }}
-                />
-                <View style={{ flexDirection: "row-reverse" }}>
-                    <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={handleSaveReqEquipments}>
-                        <Text style={styles.text}>{i18n.t("save")}</Text>
-                    </Button>
-                    <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => setShowReqEquipmentsModal(false)}>
-                        <Text style={styles.text}>{i18n.t("back")}</Text>
-                    </Button>
-                </View>
-            </Modal>
+                <Modal
+                    visible={showReqEquipmentsModal}
+                    onDismiss={() => setShowReqEquipmentsModal(false)}
+                    contentContainerStyle={[styles.modalStyle, { justifyContent: 'space-between', height: '100%' }]}
+                >
+                    <TextInput
+                        placeholder={i18n.t("search")}
+                        clearButtonMode="always"
+                        style={styles.searchBox}
+                        value={searchText}
+                        onChangeText={(text) => {
+                            setSearchText(text);
+                            const filteredList = Commons.handleSearch(text, defaultEquipmentsList);
+                            setFilteredEquipmentsList(filteredList);
+                        }}
+                    />
+                    <View style={{ flex: 1 }}>
+                        <Text style={styles.modalTitle}>
+                            {i18n.t("equipments")}
+                        </Text>
+                        <FlatList
+                            keyExtractor={(item) => item.EQ_NO}
+                            data={filteredEquipmentsList}
+                            extraData={selectedReqEquipments}
+                            style={{ flex: 1 }}
+                            contentContainerStyle={{ paddingBottom: 10 }}
+                            renderItem={({ item }) => {
+                                const existingEquipment = selectedReqEquipments.find(eq => eq.EQ_NO === item.EQ_NO);
+                                return (
+                                    <TouchableOpacity
+                                        onPress={() => handleReqEquipmentPress(item)}
+                                        style={{
+                                            padding: 15,
+                                            borderWidth: 0.5,
+                                            borderRadius: 5,
+                                            marginBottom: 5,
+                                            backgroundColor: existingEquipment ? '#ececec' : 'white'
+                                        }}
+                                    >
+                                        <Text style={{ color: "red", alignSelf: 'center' }}>{item.EQ_NO}</Text>
+                                        <Text style={{ alignSelf: 'center', marginTop: 10 }}>
+                                            {curLang == "en" ? item.EN_DESC : item.AR_DESC}
+                                        </Text>
+                                        {existingEquipment && (
+                                            <>
+                                                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 10 }}>
+                                                    <Text>{i18n.t("isEmpty")}</Text>
+                                                    <RadioButton
+                                                        value="empty"
+                                                        status={existingEquipment.isEmpty ? 'checked' : 'unchecked'}
+                                                        onPress={() => handleReqEquipmentEmptyChange(item.EQ_NO)}
+                                                    />
+                                                </View>
+                                                <TextInput
+                                                    key={`req-equipment-notes-${item.EQ_NO}`}
+                                                    placeholder={i18n.t("notes")}
+                                                    disabled={isReadOnly}
+                                                    multiline={true}
+                                                    defaultValue={existingEquipment.notes || ''}
+                                                    onChangeText={(text) => handleReqEquipmentNotesChange(item.EQ_NO, text)}
+                                                    textAlign="left"
+                                                    textAlignVertical="top"
+                                                    style={{
+                                                        marginTop: 10,
+                                                        minHeight: 40,
+                                                        paddingHorizontal: 10,
+                                                        paddingVertical: 8,
+                                                        borderWidth: 1,
+                                                        borderColor: '#ccc',
+                                                        borderRadius: 4,
+                                                        backgroundColor: '#fff'
+                                                    }}
+                                                />
+                                            </>
+                                        )}
+                                    </TouchableOpacity>
+                                );
+                            }}
+                        />
+                    </View>
+                    <View style={{ flexDirection: "row-reverse", paddingTop: 10 }}>
+                        <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={handleSaveReqEquipments}>
+                            <Text style={styles.text}>{i18n.t("save")}</Text>
+                        </Button>
+                        <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => setShowReqEquipmentsModal(false)}>
+                            <Text style={styles.text}>{i18n.t("back")}</Text>
+                        </Button>
+                    </View>
+                </Modal>
+            </KeyboardAvoidingView>
         );
     };
 
@@ -958,72 +1418,84 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
     const renderAddActionModal = () => {
         return (
-            <Modal visible={showAddActionModal} transparent={false} onDismiss={() => {
-                setShowActionModal(false);
-                setActionsLoading(false);
-            }} contentContainerStyle={[styles.modalStyle]}>
-                <Text style={styles.modalTitle}>
-                    {i18n.t("actions")}
-                </Text>
-                <Text style={styles.modalTitle}>
-                    {curLang == "en" && selectedDepartmentEnDesc} {curLang == "ar" && selectedDepartmentArDesc}
-                </Text>
-                {actionsLoading ? (
-                    <View style={styles.loadingContainer}>
-                        <ActivityIndicator size="large" color={Constants.darkBlueColor} />
-                        <Text style={styles.loadingText}>{i18n.t("loading")}</Text>
+            <KeyboardAvoidingView
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                style={{ flex: 1 }}
+                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+            >
+                <Modal visible={showAddActionModal} transparent={false} onDismiss={() => {
+                    setShowActionModal(false);
+                    setActionsLoading(false);
+                }} contentContainerStyle={[styles.modalStyle, { justifyContent: 'space-between', height: '100%' }]}>
+                    <View style={{ flex: 1 }}>
+                        <Text style={styles.modalTitle}>
+                            {i18n.t("actions")}
+                        </Text>
+                        <Text style={styles.modalTitle}>
+                            {curLang == "en" && selectedDepartmentEnDesc} {curLang == "ar" && selectedDepartmentArDesc}
+                        </Text>
+                        {actionsLoading ? (
+                            <View style={styles.loadingContainer}>
+                                <ActivityIndicator size="large" color={Constants.darkBlueColor} />
+                                <Text style={styles.loadingText}>{i18n.t("loading")}</Text>
+                            </View>
+                        ) : (
+                            <FlatList
+                                keyExtractor={(item) => item.ID}
+                                data={actionsList}
+                                extraData={actionsList}
+                                style={{ flex: 1 }}
+                                contentContainerStyle={{ paddingBottom: 10 }}
+                                renderItem={renderActionItem}
+                            />
+                        )}
                     </View>
-                ) : (
-                    <FlatList
-                        keyExtractor={(item) => item.ID}
-                        data={actionsList}
-                        extraData={actionsList}
-                        renderItem={renderActionItem}
-                    />
-                )}
-                <View style={{ flexDirection: "row" }}>
-                    <Button mode="contained" icon={({ size, color }) => (
-                        <Ionicons name="arrow-back" size={size} color={color} />
-                    )} style={{ borderRadius: 0, flex: isReadOnly ? 1 : 0.5, marginHorizontal: 2 }} onPress={async () => {
-                        setCheckedActionsList([]);
-                        setActionsLoading(false);
-                        setShowActionModal(false);
-                    }}>
-                        <Text style={styles.text}>{i18n.t("back")}</Text>
-                    </Button>
-                    {!isReadOnly && (<Button mode="contained" icon={({ size, color }) => (
-                        <Ionicons name="save" size={size} color={color} />
-                    )} style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={async () => {
-                        const valid = addActionValidations();
-                        if (!valid) return;
-                        let adList = addedDepartmentsList;
-                        const existingDepartmentIndex = adList.findIndex(dept => dept.ID === selectedDepartment);
-                        if (existingDepartmentIndex !== -1) {
-                            adList[existingDepartmentIndex] = {
-                                ID: selectedDepartment,
-                                EN_DESC: selectedDepartmentEnDesc,
-                                AR_DESC: selectedDepartmentArDesc,
-                                ACTIONS: checkedActionsList,
-                                LOCATION: startLocation
-                            };
-                        } else {
-                            adList.push({
-                                ID: selectedDepartment,
-                                EN_DESC: selectedDepartmentEnDesc,
-                                AR_DESC: selectedDepartmentArDesc,
-                                ACTIONS: checkedActionsList,
-                                LOCATION: startLocation
-                            });
-                        }
-                        setAddedDepartmentsList(adList);
-                        setActionsLoading(false);
-                        setShowActionModal(false);
-                    }}>
-                        <Text style={styles.text}>{i18n.t("save")}</Text>
-                    </Button>)}
-                </View>
+                    {!showEquipmentsModal && !showReqEquipmentsModal && (
+                        <View style={{ flexDirection: "row", paddingTop: 10 }}>
+                            <Button mode="contained" icon={({ size, color }) => (
+                                <Ionicons name="arrow-back" size={size} color={color} />
+                            )} style={{ borderRadius: 0, flex: isReadOnly ? 1 : 0.5, marginHorizontal: 2 }} onPress={async () => {
+                                setCheckedActionsList([]);
+                                setActionsLoading(false);
+                                setShowActionModal(false);
+                            }}>
+                                <Text style={styles.text}>{i18n.t("back")}</Text>
+                            </Button>
+                            {!isReadOnly && (<Button mode="contained" icon={({ size, color }) => (
+                                <Ionicons name="save" size={size} color={color} />
+                            )} style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={async () => {
+                                const valid = addActionValidations();
+                                if (!valid) return;
+                                let adList = addedDepartmentsList;
+                                const existingDepartmentIndex = adList.findIndex(dept => dept.ID === selectedDepartment);
+                                if (existingDepartmentIndex !== -1) {
+                                    adList[existingDepartmentIndex] = {
+                                        ID: selectedDepartment,
+                                        EN_DESC: selectedDepartmentEnDesc,
+                                        AR_DESC: selectedDepartmentArDesc,
+                                        ACTIONS: checkedActionsList,
+                                        LOCATION: startLocation
+                                    };
+                                } else {
+                                    adList.push({
+                                        ID: selectedDepartment,
+                                        EN_DESC: selectedDepartmentEnDesc,
+                                        AR_DESC: selectedDepartmentArDesc,
+                                        ACTIONS: checkedActionsList,
+                                        LOCATION: startLocation
+                                    });
+                                }
+                                setAddedDepartmentsList(adList);
+                                setActionsLoading(false);
+                                setShowActionModal(false);
+                            }}>
+                                <Text style={styles.text}>{i18n.t("save")}</Text>
+                            </Button>)}
+                        </View>
+                    )}
 
-            </Modal >
+                </Modal>
+            </KeyboardAvoidingView>
 
 
         )
@@ -1047,48 +1519,209 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     {curLang == "en" && (<Text style={[styles.text2(curLang), { color: "red" }]}>{item.EN_DESC}</Text>)}
                     {curLang == "ar" && (<Text style={[styles.text2(curLang), { color: "red" }]}>{item.AR_DESC}</Text>)}
                     {!isReadOnly && (<AttachmentPicker onAttachmentSelected={(attachment) => {
-                        const list = checkedActionsList.map((act) => {
-                            if (act.ID == item.ID) {
-                                act.ATTACHMENT = attachment;
-                            }
-                            return act;
-                        });
-                        setCheckedActionsList(list);
-                    }} />)}
+                        // Check if action exists in checkedActionsList
+                        const actionExists = checkedActionsList.some(act => act.ID == item.ID);
 
-                    {checkedActionsList.find(act => act.ID === item.ID)?.ATTACHMENT && (
-                        <View style={{ flexDirection: curLang == "ar" ? "row-reverse" : "row" }}>
-                            {/* <Text>
-                                {i18n.t("attached")} {" : "}
-                            </Text> */}
-                            <TouchableOpacity onPress={() => handleAttachmentPress(checkedActionsList.find(act => act.ID === item.ID)?.ATTACHMENT)}>
-                                <Text style={{ textDecorationLine: 'underline', color: 'blue' }}>
-                                    {checkedActionsList.find(act => act.ID === item.ID)?.ATTACHMENT}
-                                </Text>
-                            </TouchableOpacity>
-                        </View>
-                    )}
-
-
-                    <TextInput
-                        placeholder={i18n.t("notes")}
-                        multiline={true}
-                        value={checkedActionsList.find(act => act.ID === item.ID)?.NOTES}
-                        onChangeText={(text) => {
-                            const list = checkedActionsList.map((act) => {
+                        let updatedActionsList;
+                        if (actionExists) {
+                            // Update existing action
+                            updatedActionsList = checkedActionsList.map((act) => {
                                 if (act.ID == item.ID) {
-                                    act.NOTES = text;
+                                    // Create a new action object to avoid mutations
+                                    const updatedAction = { ...act };
+                                    // Initialize ATTACHMENTS array if it doesn't exist
+                                    if (!updatedAction.ATTACHMENTS) {
+                                        updatedAction.ATTACHMENTS = [];
+                                    }
+                                    // Add new attachment to a new array (avoid mutation)
+                                    updatedAction.ATTACHMENTS = [...updatedAction.ATTACHMENTS, attachment];
+                                    // Keep single ATTACHMENT for backward compatibility
+                                    if (!updatedAction.ATTACHMENT) {
+                                        updatedAction.ATTACHMENT = attachment;
+                                    }
+                                    return updatedAction;
                                 }
                                 return act;
                             });
-                            setCheckedActionsList(list);
+                        } else {
+                            // Add new action to checkedActionsList with the attachment
+                            const newAction = {
+                                ID: item.ID,
+                                EN_DESC: item.EN_DESC,
+                                AR_DESC: item.AR_DESC,
+                                ATTACHMENT: attachment,
+                                ATTACHMENTS: [attachment],
+                                NOTES: "",
+                                IS_CHECKED: false,
+                                EXPECTED_DATE: "",
+                                DEPARTMENT: selectedDepartment,
+                                EQUIPMENTS: []
+                            };
+                            updatedActionsList = [...checkedActionsList, newAction];
+                        }
+                        setCheckedActionsList(updatedActionsList);
+
+                        // Find the current department in addedDepartmentsList and update
+                        const currentDeptIndex = addedDepartmentsList.findIndex(dept => dept.ID === selectedDepartment);
+                        if (currentDeptIndex !== -1) {
+                            // Department exists, update its actions
+                            const updatedDepartmentsList = addedDepartmentsList.map((department, index) => {
+                                if (index === currentDeptIndex) {
+                                    return {
+                                        ...department,
+                                        ACTIONS: updatedActionsList
+                                    };
+                                }
+                                return department;
+                            });
+                            setAddedDepartmentsList(updatedDepartmentsList);
+                        } else {
+                            // Department doesn't exist yet, it will be created when saving the modal
+                            // The updatedActionsList will be used when creating the department
+                        }
+                    }} />)}
+
+                    {checkedActionsList.find(act => act.ID === item.ID)?.ATTACHMENTS &&
+                        checkedActionsList.find(act => act.ID === item.ID)?.ATTACHMENTS.length > 0 && (
+                            <ScrollView style={{ marginTop: 10, maxHeight: 120 }} nestedScrollEnabled={true}>
+                                {checkedActionsList.find(act => act.ID === item.ID)?.ATTACHMENTS.map((attachment, index) => (
+                                    <View key={index} style={{
+                                        flexDirection: curLang == "ar" ? "row-reverse" : "row",
+                                        justifyContent: "space-between",
+                                        alignItems: "center",
+                                        marginBottom: 5,
+                                        padding: 8,
+                                        borderWidth: 0.5,
+                                        borderColor: "#ccc",
+                                        borderRadius: 5,
+                                        backgroundColor: "#f9f9f9"
+                                    }}>
+                                        <TouchableOpacity
+                                            onPress={() => handleAttachmentPress(attachment)}
+                                            style={{ flex: 1 }}
+                                        >
+                                            <Text style={{ textDecorationLine: 'underline', color: 'blue' }}>
+                                                {attachment}
+                                            </Text>
+                                        </TouchableOpacity>
+                                        {!isReadOnly && (
+                                            <TouchableOpacity
+                                                onPress={() => {
+                                                    // Update checkedActionsList
+                                                    const updatedActions = checkedActionsList.map((act) => {
+                                                        if (act.ID === item.ID && act.ATTACHMENTS) {
+                                                            const updatedAttachments = act.ATTACHMENTS.filter((_, i) => i !== index);
+                                                            act.ATTACHMENTS = updatedAttachments;
+                                                            // Update single ATTACHMENT field for backward compatibility
+                                                            act.ATTACHMENT = updatedAttachments.length > 0 ? updatedAttachments[0] : "";
+                                                        }
+                                                        return act;
+                                                    });
+                                                    setCheckedActionsList(updatedActions);
+
+                                                    // Also update addedDepartmentsList to keep data in sync
+                                                    const updatedDepartmentsList = addedDepartmentsList.map(department => ({
+                                                        ...department,
+                                                        ACTIONS: department.ACTIONS.map(action => {
+                                                            if (action.ID === item.ID && action.ATTACHMENTS) {
+                                                                const updatedAttachments = action.ATTACHMENTS.filter((_, i) => i !== index);
+                                                                action.ATTACHMENTS = updatedAttachments;
+                                                                // Update single ATTACHMENT field for backward compatibility
+                                                                action.ATTACHMENT = updatedAttachments.length > 0 ? updatedAttachments[0] : "";
+                                                            }
+                                                            return action;
+                                                        })
+                                                    }));
+                                                    setAddedDepartmentsList(updatedDepartmentsList);
+                                                }}
+                                                style={{ marginLeft: 10 }}
+                                            >
+                                                <Ionicons name="trash" size={20} color="red" />
+                                            </TouchableOpacity>
+                                        )}
+                                    </View>
+                                ))}
+                            </ScrollView>
+                        )}
+
+
+                    <TextInput
+                        key={`action-notes-${item.ID}`}
+                        placeholder={i18n.t("notes")}
+                        multiline={true}
+                        defaultValue={checkedActionsList.find(act => act.ID === item.ID)?.NOTES || ""}
+                        onChangeText={(text) => {
+                            // Check if action exists in checkedActionsList
+                            const actionExists = checkedActionsList.some(act => act.ID == item.ID);
+
+                            if (actionExists) {
+                                // Update existing action using immutable approach
+                                setCheckedActionsList(prevList =>
+                                    prevList.map((act) => {
+                                        if (act.ID == item.ID) {
+                                            return { ...act, NOTES: text };
+                                        }
+                                        return act;
+                                    })
+                                );
+                            } else {
+                                // Add new action to checkedActionsList with the notes
+                                const newAction = {
+                                    ID: item.ID,
+                                    EN_DESC: item.EN_DESC,
+                                    AR_DESC: item.AR_DESC,
+                                    ATTACHMENT: "",
+                                    ATTACHMENTS: [],
+                                    NOTES: text,
+                                    IS_CHECKED: false,
+                                    EXPECTED_DATE: "",
+                                    DEPARTMENT: selectedDepartment,
+                                    EQUIPMENTS: []
+                                };
+                                setCheckedActionsList(prevList => [...prevList, newAction]);
+                            }
+                        }}
+                        textAlign="left"
+                        textAlignVertical="top"
+                        style={{
+                            minHeight: 40,
+                            paddingHorizontal: 10,
+                            paddingVertical: 8,
+                            borderWidth: 1,
+                            borderColor: '#ccc',
+                            borderRadius: 4,
+                            backgroundColor: '#fff'
                         }}
                     />
-                    <TouchableOpacity style={{ flexDirection: curLang == "ar" ? 'row' : 'row-reverse', justifyContent: "space-between", backgroundColor: Constants.darkBlueColor, paddingVertical: 7, marginTop: 10, width: "100%", paddingHorizontal: 10 }} onPress={() => {
+                    <TouchableOpacity style={{ flexDirection: curLang == "ar" ? 'row' : 'row-reverse', justifyContent: "space-between", backgroundColor: Constants.darkBlueColor, paddingVertical: 7, marginTop: 10, width: "100%", paddingHorizontal: 10 }} onPress={async () => {
                         if (!isReadOnly) {
                             setSelectedAction(item.ID);
                             const selectedAction = item.ID;
                             const useCustEquipments = actionsList.find(act => act.ID === selectedAction)?.USE_CUSTOMER_EQUIPMENTS || false;
+
+                            // Check if equipments list is empty and refetch if needed
+                            if (!useCustEquipments && defaultEquipmentsList.length === 0) {
+                                await refetchEquipments();
+                            }
+                            if (useCustEquipments && (!customerEquipmentsList || customerEquipmentsList.length === 0)) {
+                                // Refetch customer details to obtain equipments if missing
+                                setLoading(true);
+                                setLoadingMessage(i18n.t("loading"));
+                                try {
+                                    const details = await ServerOperations.getCustomerDetails(selectedCust, selectedCustBranch);
+                                    if (details && Array.isArray(details.EQUIPMENTS)) {
+                                        setCustomerEquipmentsList(details.EQUIPMENTS);
+                                    } else {
+                                        setCustomerEquipmentsList([]); // ensure defined
+                                    }
+                                } catch (err) {
+                                    console.error("Failed to fetch customer equipments:", err);
+                                } finally {
+                                    setLoading(false);
+                                    setLoadingMessage("");
+                                }
+                            }
+
                             if (useCustEquipments) {
                                 setEquipmentsList(customerEquipmentsList);
                                 setFilteredEquipmentsList(customerEquipmentsList);
@@ -1164,14 +1797,35 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                 uncheckedColor="gray"
                                 status={checkedActionsList.find(act => act.ID === item.ID)?.IS_CHECKED ? 'checked' : 'unchecked'}
                                 onPress={() => {
-                                    const list = checkedActionsList.map((act) => {
-                                        if (act.ID == item.ID) {
-                                            act.IS_CHECKED = !act.IS_CHECKED;
-                                            if (act.IS_CHECKED) act.EXPECTED_DATE = "";
-                                        }
-                                        return act;
-                                    });
-                                    setCheckedActionsList(list);
+                                    // Check if action exists in checkedActionsList
+                                    const actionExists = checkedActionsList.some(act => act.ID == item.ID);
+
+                                    if (actionExists) {
+                                        // Update existing action
+                                        const list = checkedActionsList.map((act) => {
+                                            if (act.ID == item.ID) {
+                                                act.IS_CHECKED = !act.IS_CHECKED;
+                                                if (act.IS_CHECKED) act.EXPECTED_DATE = "";
+                                            }
+                                            return act;
+                                        });
+                                        setCheckedActionsList(list);
+                                    } else {
+                                        // Add new action to checkedActionsList with IS_CHECKED = true
+                                        const newAction = {
+                                            ID: item.ID,
+                                            EN_DESC: item.EN_DESC,
+                                            AR_DESC: item.AR_DESC,
+                                            ATTACHMENT: "",
+                                            ATTACHMENTS: [],
+                                            NOTES: "",
+                                            IS_CHECKED: true,
+                                            EXPECTED_DATE: "",
+                                            DEPARTMENT: selectedDepartment,
+                                            EQUIPMENTS: []
+                                        };
+                                        setCheckedActionsList([...checkedActionsList, newAction]);
+                                    }
                                 }}
                             />
                         </View>
@@ -1199,13 +1853,35 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                             setShowDatePicker(false);
                                             if (selectedDate) {
                                                 const formattedDate = moment(selectedDate).format('DD/MM/YYYY');
-                                                const list = checkedActionsList.map((act) => {
-                                                    if (act.ID == item.ID) {
-                                                        act.EXPECTED_DATE = formattedDate;
-                                                    }
-                                                    return act;
-                                                });
-                                                setCheckedActionsList(list);
+
+                                                // Check if action exists in checkedActionsList
+                                                const actionExists = checkedActionsList.some(act => act.ID == item.ID);
+
+                                                if (actionExists) {
+                                                    // Update existing action
+                                                    const list = checkedActionsList.map((act) => {
+                                                        if (act.ID == item.ID) {
+                                                            act.EXPECTED_DATE = formattedDate;
+                                                        }
+                                                        return act;
+                                                    });
+                                                    setCheckedActionsList(list);
+                                                } else {
+                                                    // Add new action to checkedActionsList with the expected date
+                                                    const newAction = {
+                                                        ID: item.ID,
+                                                        EN_DESC: item.EN_DESC,
+                                                        AR_DESC: item.AR_DESC,
+                                                        ATTACHMENT: "",
+                                                        ATTACHMENTS: [],
+                                                        NOTES: "",
+                                                        IS_CHECKED: false,
+                                                        EXPECTED_DATE: formattedDate,
+                                                        DEPARTMENT: selectedDepartment,
+                                                        EQUIPMENTS: []
+                                                    };
+                                                    setCheckedActionsList([...checkedActionsList, newAction]);
+                                                }
                                             }
                                         }}
                                     />
@@ -1238,6 +1914,12 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     setActionsLoading(true);
                     setShowActionModal(true);
 
+                    // Check if actions list is empty and refetch if needed
+                    let currentActionsList = actionsList;
+                    if (actionsList.length === 0) {
+                        currentActionsList = await refetchActions();
+                    }
+
                     // if (item.LOCATION == "" || item.LOCATION == null || item.LOCATION == undefined) {
                     //     const location = await fetchCurrentPosition()
                     //     setSelectedDepartmentLocation(location);
@@ -1247,8 +1929,18 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     // Simulate some async processing time
                     setTimeout(() => {
                         let checkedActions = [];
-                        actionsList.map((act) => {
-                            checkedActions.push({ ID: act.ID, EN_DESC: act.EN_DESC, AR_DESC: act.AR_DESC, ATTACHMENT: "", NOTES: "", IS_CHECKED: false, EXPECTED_DATE: "", DEPARTMENT: item.ID });
+                        currentActionsList.map((act) => {
+                            checkedActions.push({
+                                ID: act.ID,
+                                EN_DESC: act.EN_DESC,
+                                AR_DESC: act.AR_DESC,
+                                ATTACHMENT: "",
+                                ATTACHMENTS: [],
+                                NOTES: "",
+                                IS_CHECKED: false,
+                                EXPECTED_DATE: "",
+                                DEPARTMENT: item.ID
+                            });
                         })
                         setCheckedActionsList(checkedActions);
                         setActionsLoading(false);
@@ -1554,44 +2246,46 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     )}
                 />
 
-                <View style={{ flexDirection: "row" }}>
-                    <Button mode="contained" style={{ borderRadius: 0, flex: isReadOnly ? 1 : 0.5, marginHorizontal: 2 }} onPress={() => { setShowReqDetailsModal(false) }}>
-                        <Text style={styles.text}>{i18n.t("back")}</Text>
-                    </Button>
-                    {!isReadOnly && (<Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => {
-                        const valid = addReqActionValidations();
-                        if (!valid) return;
-                        const existingRequestIndex = addedRequestsList.findIndex(req => req.ID === selectedRequest);
-                        const newRequest = {
-                            ID: selectedRequest,
-                            EN_DESC: selectedRequestDesc,
-                            AR_DESC: selectedRequestDesc,
-                            ATTACHMENT: reqDetailsAttachment,
-                            NOTES: reqDetailsNotes,
-                            DEPARTMENTS: reqDetailsDepartments,
-                            EQUIPMENTS: reqDetailsEquipments,
-                        };
-                        if (existingRequestIndex !== -1) {
-                            const updatedRequestsList = [...addedRequestsList];
-                            updatedRequestsList[existingRequestIndex] = newRequest;
-                            setAddedRequestsList(updatedRequestsList);
-                        } else {
-                            setAddedRequestsList([...addedRequestsList, newRequest]);
-                        }
-                        setShowReqDetailsModal(false);
-                        setShowReqActionModal(false)
-                        setSelectedRequest("");
-                        setSelectedRequestDesc("");
-                        setSelectedRequestHint("");
-                        setSelectedRequestNotesRequired("");
-                        setReqDetailsAttachment("");
-                        setReqDetailsNotes("");
-                        setReqDetailsDepartments([]);
-                        setReqDetailsEquipments([]);
-                    }}>
-                        <Text style={styles.text}>{i18n.t("save")}</Text>
-                    </Button>)}
-                </View>
+                {!showReqEquipmentsModal && (
+                    <View style={{ flexDirection: "row" }}>
+                        <Button mode="contained" style={{ borderRadius: 0, flex: isReadOnly ? 1 : 0.5, marginHorizontal: 2 }} onPress={() => { setShowReqDetailsModal(false) }}>
+                            <Text style={styles.text}>{i18n.t("back")}</Text>
+                        </Button>
+                        {!isReadOnly && (<Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => {
+                            const valid = addReqActionValidations();
+                            if (!valid) return;
+                            const existingRequestIndex = addedRequestsList.findIndex(req => req.ID === selectedRequest);
+                            const newRequest = {
+                                ID: selectedRequest,
+                                EN_DESC: selectedRequestDesc,
+                                AR_DESC: selectedRequestDesc,
+                                ATTACHMENT: reqDetailsAttachment,
+                                NOTES: reqDetailsNotes,
+                                DEPARTMENTS: reqDetailsDepartments,
+                                EQUIPMENTS: reqDetailsEquipments,
+                            };
+                            if (existingRequestIndex !== -1) {
+                                const updatedRequestsList = [...addedRequestsList];
+                                updatedRequestsList[existingRequestIndex] = newRequest;
+                                setAddedRequestsList(updatedRequestsList);
+                            } else {
+                                setAddedRequestsList([...addedRequestsList, newRequest]);
+                            }
+                            setShowReqDetailsModal(false);
+                            setShowReqActionModal(false)
+                            setSelectedRequest("");
+                            setSelectedRequestDesc("");
+                            setSelectedRequestHint("");
+                            setSelectedRequestNotesRequired("");
+                            setReqDetailsAttachment("");
+                            setReqDetailsNotes("");
+                            setReqDetailsDepartments([]);
+                            setReqDetailsEquipments([]);
+                        }}>
+                            <Text style={styles.text}>{i18n.t("save")}</Text>
+                        </Button>)}
+                    </View>
+                )}
             </Modal >
         );
     };
@@ -1730,7 +2424,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                                         text: i18n.t("yes"),
                                         onPress: async () => {
                                             setShowCustomerVisitsModal(false);
-                                            navigation.push("NewVisit", { custID: selectedCust, custName: selectedCustName, phone: selectedCustPhone, branch: selectedCustBranch, visitID: item.VISIT_ID });
+                                            navigation.push("NewVisit", { custID: selectedCust, custName: selectedCustName, phone: selectedCustPhone, visitID: item.VISIT_ID });
                                         }
                                     }
                                 ]
@@ -1740,7 +2434,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                             <Text>{i18n.t("date")}: {item.DATE}</Text>
                             <Text>{i18n.t("time")}: {item.TIME}</Text>
                             <Text>{i18n.t("username")}: {item.USER}</Text>
-                            {!isHygex && (<View><Text>{i18n.t("type")}: {item.TYPE}</Text>
+                            {!isHygex && !isNotesVisit && (<View><Text>{i18n.t("type")}: {item.TYPE}</Text>
                                 <Text style={styles.rowText}>{i18n.t("visitcall")}: {item.VISIT_CALL}</Text></View>)}
                             {item.VISIT_CALL == "Call" && (<Text style={styles.rowText}>{i18n.t("callDuration")}: {item.CALL_DURATION}</Text>)}
                         </TouchableOpacity>
@@ -1821,24 +2515,21 @@ export const NewVisitScreen = ({ route, navigation }) => {
             </Modal>
         );
     };
-
-
-
     return (
-        [<Portal>{showAddDepartmentDialog && renderAddDepartmentDialog()}</Portal>,
-        <Portal>{showReqActionModal && renderAddReqActionModal()}</Portal>,
-        <Portal>{showReqDetailsModal && renderReqDetailsModal()}</Portal>,
-        <Portal>{showAddReqDepartmentDialog && renderAddReqDepartmentDialog()}</Portal>,
-        <Portal>{showAddActionModal && renderAddActionModal()}</Portal>,
-        <Portal>{showEquipmentsModal && renderEquipmentsModal()}</Portal>,
-        <Portal>{showReqEquipmentsModal && renderReqEquipmentsModal()}</Portal>,
-        <Portal>{showCustomerEquipmentsModal && renderCustomerEquipmentsModal()}</Portal>,
+        [<Portal key="addDepartmentDialog">{showAddDepartmentDialog && renderAddDepartmentDialog()}</Portal>,
+        <Portal key="reqActionModal">{showReqActionModal && renderAddReqActionModal()}</Portal>,
+        <Portal key="reqDetailsModal">{showReqDetailsModal && renderReqDetailsModal()}</Portal>,
+        <Portal key="addReqDepartmentDialog">{showAddReqDepartmentDialog && renderAddReqDepartmentDialog()}</Portal>,
+        <Portal key="addActionModal">{showAddActionModal && renderAddActionModal()}</Portal>,
+        <Portal key="equipmentsModal">{showEquipmentsModal && renderEquipmentsModal()}</Portal>,
+        <Portal key="reqEquipmentsModal">{showReqEquipmentsModal && renderReqEquipmentsModal()}</Portal>,
+        <Portal key="customerEquipmentsModal">{showCustomerEquipmentsModal && renderCustomerEquipmentsModal()}</Portal>,
         // <Portal>{imagePreviewVisible && renderImagePreviewModal()}</Portal>,
-        <Portal>{showContactsModal && renderContactsModal()}</Portal>,
-        <Portal>{showCustomerVisitsModal && renderCustomerVisitsModal()}</Portal>,
-        <Portal>{showBusinessTypeModal && renderBussinessTypeModal()}</Portal>,
-        <Portal>{loading && <ProgressDialog visible={loading} message={loadingMessage} />}</Portal>,
-        <SafeAreaView style={styles.cardContainer}>
+        <Portal key="contactsModal">{showContactsModal && renderContactsModal()}</Portal>,
+        <Portal key="customerVisitsModal">{showCustomerVisitsModal && renderCustomerVisitsModal()}</Portal>,
+        <Portal key="businessTypeModal">{showBusinessTypeModal && renderBussinessTypeModal()}</Portal>,
+        <Portal key="progressDialog">{loading && <ProgressDialog visible={loading} message={loadingMessage} />}</Portal>,
+        <SafeAreaView key="mainContent" style={styles.cardContainer}>
 
             <View style={{ backgroundColor: Constants.appColor, padding: 10, width: "100%" }}>
                 <View style={{ flexDirection: curLang == "ar" ? 'row-reverse' : 'row', justifyContent: "space-between" }}>
@@ -1856,7 +2547,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 <Text style={[styles.text, { marginTop: 10, textAlign: curLang == "ar" ? "right" : "left" }]}>{i18n.t("customer")} {" : "} {selectedCustName}  </Text>
                 <Text style={[styles.text, { marginTop: 10, textAlign: curLang == "ar" ? "right" : "left" }]}>{i18n.t("branch")} {" : "} {selectedCustBranch}  </Text>
                 {/* <Text style={[styles.text, { marginTop: 10 }]}>{i18n.t("phone")} {" : "} {selectedCustPhone}  </Text> */}
-                {!isHygex && (
+                {!isHygex && !isNotesVisit && (
                     <View style={{ flexDirection: "row" }}>
                         <Button icon="contacts" style={{ flex: 0.5, marginHorizontal: 2 }} labelStyle={{ color: "white" }} onPress={() => {
                             setShowContactsModal(true);
@@ -1874,7 +2565,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
 
             </View>
-            {!isHygex && (
+            {!isHygex && !isNotesVisit && (
                 <View style={[styles.taskItemView(curLang)]}>
                     <Text style={styles.text2(curLang)}>{i18n.t("visitcall")} {" : "}</Text>
                     <View>
@@ -1910,7 +2601,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     </View>
                 </View>
             )}
-            {!isHygex && selectedType == "Call" && (<View style={{ alignSelf: "center" }}>
+            {!isHygex && !isNotesVisit && selectedType == "Call" && (<View style={{ alignSelf: "center" }}>
                 {!callEnded && (<Button
                     onPress={() => {
                         calculateCallDuration();
@@ -1927,7 +2618,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
             </View>)}
 
-            {!isHygex && (
+            {!isHygex && !isNotesVisit && (
                 <View style={styles.taskItemView(curLang)}>
                     <Text style={styles.text2(curLang)}>{i18n.t("visitType")} {" : "}</Text>
                     <View>
@@ -1951,19 +2642,44 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 </View>
             )}
 
-            {!isHygex && (
+            {!isHygex && !isNotesVisit && (
                 <>
-                    <TouchableOpacity style={{ flexDirection: curLang == "ar" ? 'row' : 'row-reverse', justifyContent: "space-between", backgroundColor: Constants.appColor, padding: 10, width: "100%" }} onPress={() => {
+                    <TouchableOpacity style={{
+                        flexDirection: curLang == "ar" ? 'row' : 'row-reverse',
+                        justifyContent: "space-between",
+                        backgroundColor: selectedType == "Request" ? "#ccc" : Constants.appColor,
+                        padding: 10,
+                        width: "100%",
+                        opacity: selectedType == "Request" ? 0.6 : 1
+                    }} onPress={async () => {
                         if (!isReadOnly) {
                             if (selectedType == "") {
                                 Alert.alert(i18n.t("error"), i18n.t("selectVisitCall"));
                                 return;
                             }
+                            if (selectedType == "Request") {
+                                Alert.alert(i18n.t("error"), i18n.t("cannotAddDepartmentsForRequest"));
+                                return;
+                            }
+
+                            // Check if departments list is empty and refetch if needed
+                            if (departmentsList.length === 0) {
+                                const success = await refetchDepartments();
+                                if (!success) return;
+                            } else {
+                                console.log('Departments already loaded:', departmentsList.length);
+                            }
+
                             setShowAddDepartmentDialog(true);
                         }
                     }}>
-                        <Ionicons name="add-circle-outline" size={26} color="white" />
-                        <Text style={{ textAlign: "flex-end", fontSize: 16, color: "white", fontWeight: "bold" }}>
+                        <Ionicons name="add-circle-outline" size={26} color={selectedType == "Request" ? "#888" : "white"} />
+                        <Text style={{
+                            textAlign: "flex-end",
+                            fontSize: 16,
+                            color: selectedType == "Request" ? "#888" : "white",
+                            fontWeight: "bold"
+                        }}>
                             {i18n.t("addedDepartments")}
                         </Text>
                     </TouchableOpacity>
@@ -1977,10 +2693,20 @@ export const NewVisitScreen = ({ route, navigation }) => {
                 </>
             )}
 
-            {!isHygex && (
+            {!isHygex && !isNotesVisit && (
                 <>
-                    <TouchableOpacity style={{ flexDirection: curLang == "ar" ? 'row' : 'row-reverse', justifyContent: "space-between", backgroundColor: Constants.appColor, padding: 10, width: "100%" }} onPress={() => {
-                        if (!isReadOnly) setShowReqActionModal(true)
+                    <TouchableOpacity style={{ flexDirection: curLang == "ar" ? 'row' : 'row-reverse', justifyContent: "space-between", backgroundColor: Constants.appColor, padding: 10, width: "100%" }} onPress={async () => {
+                        if (!isReadOnly) {
+                            // Check if requests list is empty and refetch if needed
+                            if (requestsList.length === 0) {
+                                const success = await refetchRequestActions();
+                                if (!success) return;
+                            } else {
+                                console.log('Requests already loaded:', requestsList.length);
+                            }
+
+                            setShowReqActionModal(true);
+                        }
                     }}>
                         <Ionicons name="add-circle-outline" size={26} color="white" />
                         <Text style={{ textAlign: "flex-end", fontSize: 16, color: "white", fontWeight: "bold" }}>
@@ -1996,8 +2722,71 @@ export const NewVisitScreen = ({ route, navigation }) => {
                     />
                 </>
             )}
+
+            {isNotesVisit && (
+                <View style={{ marginTop: 20 }}>
+                    <TextInput
+                        placeholder={i18n.t("notes")}
+                        multiline={true}
+                        value={visitNotes}
+                        onChangeText={setVisitNotes}
+                        style={{ minHeight: 100, marginBottom: 10 }}
+                        textAlign="left"
+                        textAlignVertical="top"
+                        disabled={isReadOnly}
+                    />
+
+                    {!isReadOnly && (
+                        <View style={{ marginBottom: 10 }}>
+                            <AttachmentPicker onAttachmentSelected={(attachment) => {
+                                setVisitAttachments([...visitAttachments, attachment]);
+                            }} />
+
+                        </View>
+                    )}
+
+                    {visitAttachments.length > 0 && (
+                        <ScrollView style={{ marginTop: 10, maxHeight: 150 }} nestedScrollEnabled={true}>
+                            {visitAttachments.map((attachment, index) => (
+                                <View key={index} style={{
+                                    flexDirection: curLang == "ar" ? "row-reverse" : "row",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    marginBottom: 5,
+                                    padding: 8,
+                                    borderWidth: 0.5,
+                                    borderColor: "#ccc",
+                                    borderRadius: 5,
+                                    backgroundColor: "#f9f9f9"
+                                }}>
+                                    <TouchableOpacity
+                                        onPress={() => handleAttachmentPress(attachment)}
+                                        style={{ flex: 1 }}
+                                    >
+                                        <Text style={{ textDecorationLine: 'underline', color: 'blue' }}>
+                                            {attachment}
+                                        </Text>
+                                    </TouchableOpacity>
+                                    {!isReadOnly && (
+                                        <TouchableOpacity
+                                            onPress={() => {
+                                                const updatedAttachments = visitAttachments.filter((_, i) => i !== index);
+                                                setVisitAttachments(updatedAttachments);
+                                            }}
+                                            style={{ marginLeft: 10 }}
+                                        >
+                                            <Ionicons name="trash" size={20} color="red" />
+                                        </TouchableOpacity>
+                                    )}
+                                </View>
+                            ))}
+                        </ScrollView>
+                    )}
+                </View>
+            )}
+
             {
-                !isReadOnly && (<Button style={{ marginTop: isHygex ? Constants.height / 4 : 0 }} mode="contained" icon={isHygex ? "clock-time-four" : "content-save"} onPress={saveVisit} >
+                !isReadOnly && (<Button style={{ marginTop: 20, marginBottom: 20 }} mode="contained" icon={isHygex ? "clock-time-four" : "content-save"} onPress={saveVisit} >
                     <Text style={styles.text}>{isHygex ? i18n.t("checkInOut") : i18n.t("saveVisit")}</Text>
                 </Button>)
             }
@@ -2014,7 +2803,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
             }
         </SafeAreaView >]
     );
-};
+}
 const styles = StyleSheet.create({
     dropdownStyle: {
         width: width / 1.7,  // Changed from width / 2.5
