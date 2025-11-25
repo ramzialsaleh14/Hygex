@@ -53,6 +53,7 @@ export default function MainScreen({ navigation, route }) {
   const [progressDialogVisible, setProggressDialogVisible] = useState(false);
   const [showSelectCustomerModal, setShowSelectCustomerModal] = useState(false);
   const [showMyVisitsFiltersModal, setShowMyVisitsFiltersModal] = useState(false);
+  const [showRemindersFiltersModal, setShowRemindersFiltersModal] = useState(false);
   const [showPendingVisitsFiltersModal, setShowPendingVisitsFiltersModal] = useState(false);
   const [showPendingRequestsFiltersModal, setShowPendingRequestsFiltersModal] = useState(false);
   const [searchText, setSearchText] = useState("");
@@ -927,6 +928,65 @@ export default function MainScreen({ navigation, route }) {
           </Button>
         </View>
       </Modal >
+    );
+  };
+
+  const renderRemindersFiltersModal = () => {
+    return (
+      <Modal
+        visible={true}
+        onDismiss={() => {
+          setShowRemindersFiltersModal(false);
+        }}
+        contentContainerStyle={styles.modalStyle2}
+      >
+        <Text style={styles.modalTitle}>{i18n.t("remindersFilters")}</Text>
+        <TouchableOpacity onPress={() => setShowFromDatePicker(true)}>
+          <TextInput
+            label={i18n.t("fromDate")}
+            value={moment(fromDate).format("DD/MM/YYYY")}
+            disabled={true}
+            style={styles.inputBox}
+            pointerEvents="none"
+          />
+        </TouchableOpacity>
+        {showFromDatePicker && (
+          <DateTimePicker
+            value={fromDate}
+            mode="date"
+            display="default"
+            onChange={onFromDateChange}
+          />
+        )}
+        <TouchableOpacity onPress={() => setShowToDatePicker(true)}>
+          <TextInput
+            label={i18n.t("toDate")}
+            value={moment(toDate).format("DD/MM/YYYY")}
+            minimumDate={fromDate}
+            disabled={true}
+            style={styles.inputBox}
+            pointerEvents="none"
+          />
+        </TouchableOpacity>
+        {showToDatePicker && (
+          <DateTimePicker
+            value={toDate}
+            minimumDate={fromDate}
+            mode="date"
+            display="default"
+            onChange={onToDateChange}
+          />
+        )}
+
+        <View style={{ flexDirection: "row" }}>
+          <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => setShowRemindersFiltersModal(false)}>
+            <Text style={styles.text}>{i18n.t("back")}</Text>
+          </Button>
+          <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => { setShowRemindersFiltersModal(false); navigation.navigate("Reminders", { fromDate: moment(fromDate).format("DD/MM/YYYY"), toDate: moment(toDate).format("DD/MM/YYYY") }); }}>
+            <Text style={styles.text}>{i18n.t("submit")}</Text>
+          </Button>
+        </View>
+      </Modal>
     );
   };
 
@@ -1857,6 +1917,7 @@ export default function MainScreen({ navigation, route }) {
         <ProgressDialog visible={progressDialogVisible} />
       </Portal>
       <Portal>{showMyVisitsFiltersModal && renderMyVisitsFiltersModal()}</Portal>
+      <Portal>{showRemindersFiltersModal && renderRemindersFiltersModal()}</Portal>
       {/* <Portal>{showPendingVisitsFiltersModal && renderPendingVisitsFiltersModal()}</Portal> */}
       <Portal>{showPendingVisitsModal && renderPendingVisitsModal()}</Portal>
       {/* <Portal>{showPendingRequestsFiltersModal && renderPendingRequestsFiltersModal()}</Portal> */}
@@ -1933,6 +1994,7 @@ export default function MainScreen({ navigation, route }) {
               {i18n.t("newVisit")}
             </Text>
           </TouchableOpacity>
+
           <TouchableOpacity
             onPress={async () => {
               setCustomerType("");
@@ -2084,7 +2146,26 @@ export default function MainScreen({ navigation, route }) {
             </View>
           </>
         )}
+
+        {/* Reminders row - placed after all other buttons (inside scrollable area) */}
+        <View style={[styles.buttonRow, { marginTop: 8, marginBottom: 8 }]}>
+          <TouchableOpacity
+            onPress={async () => {
+              setFromDate(new Date());
+              setToDate(new Date());
+              setShowRemindersFiltersModal(true);
+            }}
+            style={[styles.appButtonContainer(curLang), { width: '95%', alignSelf: 'center' }]}
+          >
+            <Ionicons name="notifications" style={{ marginHorizontal: 6 }} size={22} color={Constants2.appColor} />
+            <Text style={styles.appButtonText}>
+              {i18n.t("reminders")}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
       </ScrollView>
+
       <View style={{ backgroundColor: Constants2.appColor, width: "100%", height: height / 10, flexDirection: "row", justifyContent: "space-between" }}>
         <TouchableOpacity
           onPress={clearStorage}
