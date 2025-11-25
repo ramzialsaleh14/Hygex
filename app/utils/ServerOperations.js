@@ -758,6 +758,28 @@ export const getVisits = async (customer, fromDate, toDate, user, customerType, 
   return null;
 };
 
+export const getReminders = async (user, fromDate, toDate) => {
+  /* Request params */
+  let params = "";
+  params += `action=${Constants.GET_REMINDERS}`;
+  params += `&USER=${safeEncodeURIComponent(user)}`;
+  params += `&FROM.DATE=${safeEncodeURIComponent(fromDate)}`;
+  params += `&TO.DATE=${safeEncodeURIComponent(toDate)}`;
+
+  /* Send request */
+  const response = await pickHttpRequest(params);
+
+  /* Check response */
+  if (response === Constants.networkError_code) {
+    return null;
+  }
+  if (response.ok) {
+    return await response.json();
+  }
+
+  return null;
+};
+
 export const assignVisit = async (fromSalesman, toSalesman, customerId, date, branch) => {
   /* Request params */
   let params = "";

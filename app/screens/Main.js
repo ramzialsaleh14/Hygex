@@ -940,7 +940,7 @@ export default function MainScreen({ navigation, route }) {
         }}
         contentContainerStyle={styles.modalStyle2}
       >
-        <Text style={styles.modalTitle}>{i18n.t("remindersFilters")}</Text>
+        <Text style={styles.modalTitle}>{i18n.t("filters")}</Text>
         <TouchableOpacity onPress={() => setShowFromDatePicker(true)}>
           <TextInput
             label={i18n.t("fromDate")}
@@ -2148,14 +2148,14 @@ export default function MainScreen({ navigation, route }) {
         )}
 
         {/* Reminders row - placed after all other buttons (inside scrollable area) */}
-        <View style={[styles.buttonRow, { marginTop: 8, marginBottom: 8 }]}>
+        <View style={[styles.buttonRow, { marginTop: 8, marginBottom: 8, justifyContent: 'center', width: '45%' }]}>
           <TouchableOpacity
             onPress={async () => {
               setFromDate(new Date());
               setToDate(new Date());
               setShowRemindersFiltersModal(true);
             }}
-            style={[styles.appButtonContainer(curLang), { width: '95%', alignSelf: 'center' }]}
+            style={[styles.appButtonContainer(curLang), { alignSelf: 'center' }]}
           >
             <Ionicons name="notifications" style={{ marginHorizontal: 6 }} size={22} color={Constants2.appColor} />
             <Text style={styles.appButtonText}>

@@ -10,6 +10,7 @@ import { NewVisitScreen } from "./screens/NewVisit";
 import { NewCustomerPotentialScreen } from "./screens/NewCustomerPotential";
 import { NewCustomerVisitScreen } from "./screens/NewCustomerVisit";
 import { MyVisitsScreen } from "./screens/MyVisits";
+import RemindersScreen from "./screens/Reminders";
 
 const { Navigator, Screen } = createStackNavigator();
 
@@ -39,6 +40,11 @@ const AppNavigator = () => (
         options={{ title: i18n.t("myVisits") }}
         name="MyVisits"
         component={MyVisitsScreen}
+      ></Screen>
+      <Screen
+        options={{ title: i18n.t("reminders") }}
+        name="Reminders"
+        component={RemindersScreen}
       ></Screen>
       <Screen
         options={{ title: i18n.t("newCustomerVisit") }}
