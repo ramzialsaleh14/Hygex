@@ -758,13 +758,36 @@ export const getVisits = async (customer, fromDate, toDate, user, customerType, 
   return null;
 };
 
-export const getReminders = async (user, fromDate, toDate) => {
+export const getReminders = async (user, fromDate, toDate, isDone) => {
   /* Request params */
   let params = "";
   params += `action=${Constants.GET_REMINDERS}`;
   params += `&USER=${safeEncodeURIComponent(user)}`;
   params += `&FROM.DATE=${safeEncodeURIComponent(fromDate)}`;
   params += `&TO.DATE=${safeEncodeURIComponent(toDate)}`;
+  params += `&IS.DONE=${safeEncodeURIComponent(isDone)}`;
+
+  /* Send request */
+  const response = await pickHttpRequest(params);
+
+  /* Check response */
+  if (response === Constants.networkError_code) {
+    return null;
+  }
+  if (response.ok) {
+    return await response.json();
+  }
+
+  return null;
+};
+
+export const respondToReminder = async (reminderId, isDone, replyNotes) => {
+  /* Request params */
+  let params = "";
+  params += `action=${Constants.RESPOND_TO_REMINDER}`;
+  params += `&REMINDER.ID=${safeEncodeURIComponent(reminderId)}`;
+  params += `&IS.DONE=${safeEncodeURIComponent(isDone)}`;
+  params += `&REPLY.NOTES=${safeEncodeURIComponent(replyNotes || '')}`;
 
   /* Send request */
   const response = await pickHttpRequest(params);

@@ -7,7 +7,7 @@ export const width = Dimensions.get("window").width;
 export const height = Dimensions.get("window").height;
 // Urls
 //**** DONT FORGET TO UPDATE THE APP VERSION IN WEBSERVICE
-export const appVersion = "v1.8.1"; //**** DONT FORGET TO UPDATE THE APP VERSION IN WEBSERVICE
+export const appVersion = "v1.8.6"; //**** DONT FORGET TO UPDATE THE APP VERSION IN WEBSERVICE
 //**** DONT FORGET TO UPDATE THE APP VERSION IN WEBSERVICE
 export const serverBaseUrl = "https://puresoft.ddns.net";
 export const serverPublicBaseUrl = "https://puresoft.ddns.net";
@@ -75,3 +75,4 @@ export const GET_USER_ROUTE_CUSTOMERS = "GET.USER.ROUTE.CUSTOMERS";
 export const GET_SERVER_TIME = "GET.SERVER.TIME";
 export const GET_ROUTE_POTENTIAL_CUSTOMERS = "GET.ROUTE.POTENTIAL.CUSTOMERS";
 export const GET_REMINDERS = "GET.REMINDERS";
+export const RESPOND_TO_REMINDER = "RESPOND.TO.REMINDER";

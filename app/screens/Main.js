@@ -78,6 +78,7 @@ export default function MainScreen({ navigation, route }) {
   const [modalCaller, setModalCaller] = useState("NewVisit");
   const [pendingActions, setPendingActions] = useState([]);
   const [filteredPendingActions, setFilteredPendingActions] = useState([]);
+  const [isDoneFilter, setIsDoneFilter] = useState(""); // "" = All, "Y" = Done, "N" = Not Done
   const [pendingRequests, setPendingRequests] = useState([]);
   const [filteredPendingRequests, setFilteredPendingRequests] = useState([]);
   const [myRequests, setMyRequests] = useState([]);
@@ -978,11 +979,48 @@ export default function MainScreen({ navigation, route }) {
           />
         )}
 
+        <View style={{ marginVertical: 10 }}>
+          <Text style={{ fontWeight: 'bold', marginBottom: 8 }}>{i18n.t('status')}</Text>
+          <TouchableOpacity
+            onPress={() => setIsDoneFilter("")}
+            style={styles.radioButton}
+          >
+            <Ionicons
+              name={isDoneFilter === "" ? "radio-button-on" : "radio-button-off"}
+              size={24}
+              color={Constants2.appColor}
+            />
+            <Text style={{ marginLeft: 8 }}>{i18n.t("all")}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setIsDoneFilter("Y")}
+            style={styles.radioButton}
+          >
+            <Ionicons
+              name={isDoneFilter === "Y" ? "radio-button-on" : "radio-button-off"}
+              size={24}
+              color={Constants2.appColor}
+            />
+            <Text style={{ marginLeft: 8 }}>{i18n.t("done")}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={() => setIsDoneFilter("N")}
+            style={styles.radioButton}
+          >
+            <Ionicons
+              name={isDoneFilter === "N" ? "radio-button-on" : "radio-button-off"}
+              size={24}
+              color={Constants2.appColor}
+            />
+            <Text style={{ marginLeft: 8 }}>{i18n.t("notDone")}</Text>
+          </TouchableOpacity>
+        </View>
+
         <View style={{ flexDirection: "row" }}>
           <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => setShowRemindersFiltersModal(false)}>
             <Text style={styles.text}>{i18n.t("back")}</Text>
           </Button>
-          <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => { setShowRemindersFiltersModal(false); navigation.navigate("Reminders", { fromDate: moment(fromDate).format("DD/MM/YYYY"), toDate: moment(toDate).format("DD/MM/YYYY") }); }}>
+          <Button mode="contained" style={{ borderRadius: 0, flex: 0.5, marginHorizontal: 2 }} onPress={() => { setShowRemindersFiltersModal(false); navigation.navigate("Reminders", { fromDate: moment(fromDate).format("DD/MM/YYYY"), toDate: moment(toDate).format("DD/MM/YYYY"), isDone: isDoneFilter }); }}>
             <Text style={styles.text}>{i18n.t("submit")}</Text>
           </Button>
         </View>

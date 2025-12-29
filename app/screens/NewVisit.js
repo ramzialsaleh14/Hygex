@@ -213,7 +213,7 @@ export const NewVisitScreen = ({ route, navigation }) => {
 
                 const loc = `${latitude},${longitude}`;
                 console.log('Current position:', loc, 'accuracy(m):', accuracy);
-                return { location: loc, accuracy: accuracy };
+                return loc;
             } else {
                 throw new Error('Invalid position data');
             }
@@ -489,6 +489,9 @@ export const NewVisitScreen = ({ route, navigation }) => {
     }, [selectedType]);
 
     const checkLocationDistance = async (custID, branch) => {
+        // Fetch userType directly to avoid race conditions with state
+        const userType = await Commons.getFromAS("type");
+
         const details = await ServerOperations.getCustomerDetails(custID, branch);
         if (details != null && details != "" && details != undefined && !isReadOnly) {
             setContactsList(details.CONTACTS);
@@ -497,15 +500,28 @@ export const NewVisitScreen = ({ route, navigation }) => {
             const customerLoc = details.LOCATION;
             const curLoc = await getCurrentLocation();
             console.log(customerLoc);
-            if (customerLoc == "") return;
+            if (customerLoc == "") {
+                setLoading(false);
+                return;
+            };
             if (curLoc && customerLoc && !ignoreLoc) {
                 const [curLat, curLon] = curLoc.split(',').map(Number);
                 const [custLat, custLon] = customerLoc.split(',').map(Number);
                 const distance = Commons.calculateDistance(curLat, curLon, custLat, custLon);
                 console.log('Distance:', distance);
 
-                // For Hygex customers (custID "1"), allow only 200 meters instead of 750
-                const maxDistance = custID === "1" ? 0.2 : 0.75;
+                // For Hygex customers (custID "1"), allow only 200 meters
+                // For Maintenance type users, allow 4000 meters (except Hygex)
+                // For all other users, allow 750 meters
+                let maxDistance;
+                if (custID === "1") {
+                    maxDistance = 0.2; // 200 meters for Hygex
+                } else if (userType === "Maintenance") {
+                    maxDistance = 4; // 4000 meters for Maintenance users
+                } else {
+                    maxDistance = 0.75; // 750 meters for all other users
+                }
+
                 if (distance > maxDistance) {
                     const distanceInMeters = Math.round(distance * 1000);
                     Alert.alert(i18n.t("error"), i18n.t("mustBeInLocation") + ` تبعد (${distanceInMeters}متر)`);
